@@ -93,13 +93,19 @@ const startBooking = async (
       pageTitle.includes("unterbrechung") ||
       /http\s?\d{3}/i.test(pageTitle)
     ) {
-      console.error(`❗ Booking error detected, retrying... (elapsed ${Math.round(elapsed / 60000)} min)`);
+      console.error(
+        `❗ Booking error detected, retrying... (elapsed ${Math.round(
+          elapsed / 60000
+        )} min)`
+      );
 
       sendAccountLog(
         bot,
         chatId,
         acc,
-        `❗ Booking error detected, retrying...\nElapsed: ${Math.round(elapsed / 60000)} minutes`
+        `❗ Booking error detected, retrying...\nElapsed: ${Math.round(
+          elapsed / 60000
+        )} minutes`
       );
 
       await delay(5000);
@@ -120,8 +126,8 @@ const startBooking = async (
         chatId,
         acc,
         `🖥️ Browser running on display ${displayInfo.display}\n` +
-        `🔗 noVNC Access: ${displayInfo.noVncUrl}\n` +
-        `🔌 VNC Port: ${displayInfo.vncPort}`
+          `🔗 noVNC Access: ${displayInfo.noVncUrl}\n` +
+          `🔌 VNC Port: ${displayInfo.vncPort}`
       );
     }
 
@@ -171,7 +177,6 @@ const startBooking = async (
     try {
       await page.waitForNavigation({
         waitUntil: "networkidle2",
-        timeout: 20000,
       });
     } catch (err) {
       console.log(" ℹ️ Error logging in:" + (err as Error).message);
@@ -191,7 +196,6 @@ const startBooking = async (
     try {
       await page.waitForNavigation({
         waitUntil: "networkidle2",
-        timeout: 5000,
       });
       console.log("✅ Navigated after DOB form");
     } catch {
@@ -250,7 +254,7 @@ const startBooking = async (
       chatId,
       acc,
       "⏰ Session timeout reached. Account has been disabled.\n" +
-      "✅ If payment was completed successfully, the booking should be confirmed."
+        "✅ If payment was completed successfully, the booking should be confirmed."
     );
   } catch (err) {
     sendAccountLog(
@@ -258,9 +262,9 @@ const startBooking = async (
       chatId,
       acc,
       `❌ Booking process failed: ${(err as Error).message}` +
-      (displayInfo
-        ? `\n🖥️ You can still access the browser at: ${displayInfo.noVncUrl}`
-        : "")
+        (displayInfo
+          ? `\n🖥️ You can still access the browser at: ${displayInfo.noVncUrl}`
+          : "")
     );
     console.error("Error in startBooking:", err);
   }

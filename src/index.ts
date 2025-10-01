@@ -736,7 +736,7 @@ export const bot = new TelegramBot(token, { polling: true });
 
     const accountId = text.trim();
 
-    if (!accountId) {
+    if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
       await bot.sendMessage(
         chatId,
         "❌ Invalid input. Please provide a valid account ID."
@@ -825,7 +825,7 @@ export const bot = new TelegramBot(token, { polling: true });
 
     const accountId = text.trim();
 
-    if (!accountId) {
+    if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
       await bot.sendMessage(
         chatId,
         "❌ Invalid input. Please provide a valid account ID."
@@ -1177,7 +1177,7 @@ export const bot = new TelegramBot(token, { polling: true });
 
     const scheduleId = text.trim();
 
-    if (!scheduleId) {
+    if (!scheduleId || !mongoose.Types.ObjectId.isValid(scheduleId)) {
       await bot.sendMessage(
         chatId,
         "❌ Invalid input. Please provide a valid schedule ID."

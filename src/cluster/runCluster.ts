@@ -27,7 +27,10 @@ interface ScheduleManager {
 // Global display management - using only 10 pre-created displays
 const activeSchedules: Map<string, ScheduleManager> = new Map();
 const activeDisplays = new Set<string>();
-const displayPool: string[] = Array.from({ length: 10 }, (_, i) => `:${i + 1}`); // :1 to :10
+const displayPool: string[] = Array.from(
+  { length: 10 },
+  (_, i) => `:${i + 10}`
+); // :1 to :10
 
 // Mutex for display allocation
 let displayAllocationLock = Promise.resolve();
@@ -84,7 +87,8 @@ async function waitForAvailableDisplay(
     // Exponential backoff: 1s, 2s, 4s, 8s... up to 30s
     const waitTime = Math.min(1000 * Math.pow(2, attempt), 30000);
     console.log(
-      `⏳ All displays busy, waiting ${waitTime / 1000
+      `⏳ All displays busy, waiting ${
+        waitTime / 1000
       }s before retry (attempt ${attempt + 1}/${maxRetries})`
     );
     await new Promise((resolve) => setTimeout(resolve, waitTime));
@@ -168,8 +172,8 @@ async function createBrowserInstance(
           "--disable-prompt-on-repost",
         ],
         // Timeout configurations
-        timeout: 30000,
-        protocolTimeout: 30000,
+        timeout: 18000000,
+        protocolTimeout: 18000000,
       });
 
       const page = await browser.newPage();
@@ -181,11 +185,10 @@ async function createBrowserInstance(
 
       // Performance optimizations for the page
       await page.setViewport({ width: 1920, height: 1080 });
-      await page.setDefaultNavigationTimeout(30000);
+      await page.setDefaultNavigationTimeout(18000000);
       await page.setDefaultTimeout(18000000);
 
       // Disable unnecessary features for speed
-
 
       await page.setRequestInterception(true);
       page.on("request", (req) => {
@@ -259,8 +262,8 @@ async function closeBrowserInstance(
     // Force kill if normal close fails
     try {
       const pages = await browserInstance.browser.pages();
-      await Promise.all(pages.map((page) => page.close().catch(() => { })));
-      await browserInstance.browser.close().catch(() => { });
+      await Promise.all(pages.map((page) => page.close().catch(() => {})));
+      await browserInstance.browser.close().catch(() => {});
     } catch {
       // Ignore errors in force close
     }
@@ -309,8 +312,9 @@ async function processAccount(
     const displayInfo = {
       display: display,
       displayNumber: display.replace(":", ""),
-      noVncUrl: `http://${process.env.SERVER_IP || "localhost"}:${6080 + displayNumber
-        }/vnc.html`,
+      noVncUrl: `http://${process.env.SERVER_IP || "localhost"}:${
+        6080 + displayNumber
+      }/vnc.html`,
       vncPort: 5900 + displayNumber,
     };
 
@@ -345,10 +349,10 @@ async function processAccount(
         await bot.sendMessage(
           user.telegramId,
           `📊 **Progress Update**\n` +
-          `📝 Schedule: ${schedule.name}\n` +
-          `✅ Processed: ${scheduleManager.processedCount}/${totalAccounts}\n` +
-          `🎯 Successful: ${scheduleManager.successCount}\n` +
-          `❌ Errors: ${scheduleManager.errorCount}`,
+            `📝 Schedule: ${schedule.name}\n` +
+            `✅ Processed: ${scheduleManager.processedCount}/${totalAccounts}\n` +
+            `🎯 Successful: ${scheduleManager.successCount}\n` +
+            `❌ Errors: ${scheduleManager.errorCount}`,
           { parse_mode: "Markdown" }
         );
       }
@@ -364,9 +368,9 @@ async function processAccount(
       await bot.sendMessage(
         account.user.telegramId,
         `❌ **Account Error**\n` +
-        `📧 Account: ${account.email}\n` +
-        `🚨 Error: ${(accountError as Error).message}\n` +
-        `⏰ Time: ${new Date().toLocaleString()}`,
+          `📧 Account: ${account.email}\n` +
+          `🚨 Error: ${(accountError as Error).message}\n` +
+          `⏰ Time: ${new Date().toLocaleString()}`,
         { parse_mode: "Markdown" }
       );
     }
@@ -380,9 +384,9 @@ async function processAccount(
       await bot.sendMessage(
         user.telegramId,
         `⚠️ **Account Error in Schedule**\n` +
-        `📝 Schedule: ${schedule.name}\n` +
-        `📧 Account: ${account.email}\n` +
-        `❌ Error: ${(accountError as Error).message}`,
+          `📝 Schedule: ${schedule.name}\n` +
+          `📧 Account: ${account.email}\n` +
+          `❌ Error: ${(accountError as Error).message}`,
         { parse_mode: "Markdown" }
       );
     }
@@ -444,10 +448,10 @@ export const runAllAccounts = async (oid: string, scheduleId?: string) => {
       await bot.sendMessage(
         user.telegramId,
         `🚀 **Automation Started**\n` +
-        `📝 Schedule: ${schedule.name}\n` +
-        `🆔 OID: ${oid}\n` +
-        `📺 Display pool: ${displayPool.length} displays\n` +
-        `⚡ Initializing browsers...`,
+          `📝 Schedule: ${schedule.name}\n` +
+          `🆔 OID: ${oid}\n` +
+          `📺 Display pool: ${displayPool.length} displays\n` +
+          `⚡ Initializing browsers...`,
         { parse_mode: "Markdown" }
       );
     }
@@ -475,9 +479,9 @@ export const runAllAccounts = async (oid: string, scheduleId?: string) => {
         await bot.sendMessage(
           user.telegramId,
           `❌ **Schedule Failed**\n` +
-          `📝 Schedule: ${schedule.name}\n` +
-          `🚨 Error: ${errorMsg}\n` +
-          `💡 Please add active accounts and try again.`,
+            `📝 Schedule: ${schedule.name}\n` +
+            `🚨 Error: ${errorMsg}\n` +
+            `💡 Please add active accounts and try again.`,
           { parse_mode: "Markdown" }
         );
       }
@@ -490,9 +494,9 @@ export const runAllAccounts = async (oid: string, scheduleId?: string) => {
       await bot.sendMessage(
         user.telegramId,
         `🔄 **Processing Accounts**\n` +
-        `📝 Schedule: ${schedule.name}\n` +
-        `👥 Found ${accounts.length} active accounts\n` +
-        `⚡ Starting booking process...`,
+          `📝 Schedule: ${schedule.name}\n` +
+          `👥 Found ${accounts.length} active accounts\n` +
+          `⚡ Starting booking process...`,
         { parse_mode: "Markdown" }
       );
     }
@@ -577,14 +581,14 @@ export const runAllAccounts = async (oid: string, scheduleId?: string) => {
         status: wasStopped
           ? "stopped"
           : isSuccess
-            ? "success"
-            : "partial_success",
+          ? "success"
+          : "partial_success",
         lastRun: new Date(),
         lastError: wasStopped
           ? "Schedule stopped by user request"
           : isSuccess
-            ? null
-            : `${scheduleManager.errorCount} accounts failed out of ${accounts.length}`,
+          ? null
+          : `${scheduleManager.errorCount} accounts failed out of ${accounts.length}`,
       });
 
       // Send final notification
@@ -593,20 +597,20 @@ export const runAllAccounts = async (oid: string, scheduleId?: string) => {
         const statusText = wasStopped
           ? "Stopped by User"
           : isSuccess
-            ? "Completed Successfully"
-            : "Completed with Errors";
+          ? "Completed Successfully"
+          : "Completed with Errors";
 
         await bot.sendMessage(
           user.telegramId,
           `${statusIcon} **Schedule ${statusText}**\n` +
-          `📝 Schedule: ${schedule.name}\n` +
-          `👥 Total accounts: ${accounts.length}\n` +
-          `✅ Successful: ${scheduleManager.successCount}\n` +
-          `❌ Errors: ${scheduleManager.errorCount}\n` +
-          `⏰ Completed at: ${new Date().toLocaleString()}\n\n` +
-          (wasStopped
-            ? `⏹️ Schedule was stopped by user request.`
-            : isSuccess
+            `📝 Schedule: ${schedule.name}\n` +
+            `👥 Total accounts: ${accounts.length}\n` +
+            `✅ Successful: ${scheduleManager.successCount}\n` +
+            `❌ Errors: ${scheduleManager.errorCount}\n` +
+            `⏰ Completed at: ${new Date().toLocaleString()}\n\n` +
+            (wasStopped
+              ? `⏹️ Schedule was stopped by user request.`
+              : isSuccess
               ? `🎉 All accounts processed successfully!`
               : `⚠️ Some accounts encountered errors. Check individual account notifications for details.`),
           { parse_mode: "Markdown" }
@@ -631,10 +635,10 @@ export const runAllAccounts = async (oid: string, scheduleId?: string) => {
       await bot.sendMessage(
         user.telegramId,
         `❌ **Schedule Failed**\n` +
-        `📝 Schedule: ${schedule.name}\n` +
-        `🚨 System Error: ${errorMessage}\n` +
-        `⏰ Failed at: ${new Date().toLocaleString()}\n\n` +
-        `💡 This appears to be a system error. Please try again or contact support.`,
+          `📝 Schedule: ${schedule.name}\n` +
+          `🚨 System Error: ${errorMessage}\n` +
+          `⏰ Failed at: ${new Date().toLocaleString()}\n\n` +
+          `💡 This appears to be a system error. Please try again or contact support.`,
         { parse_mode: "Markdown" }
       );
     }
@@ -718,9 +722,9 @@ export const stopSchedule = async (scheduleId: string): Promise<boolean> => {
           await bot.sendMessage(
             user.telegramId,
             `🛑 **Schedule Stopped**\n` +
-            `📝 Schedule: ${schedule.name}\n` +
-            `⚠️ Booking process was stopped by request\n` +
-            `⏰ Stopped at: ${new Date().toLocaleString()}`,
+              `📝 Schedule: ${schedule.name}\n` +
+              `⚠️ Booking process was stopped by request\n` +
+              `⏰ Stopped at: ${new Date().toLocaleString()}`,
             { parse_mode: "Markdown" }
           );
         }

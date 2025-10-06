@@ -1,15 +1,21 @@
 import { bot } from "..";
 import { examMonitor } from "../api/exam-api-finder";
-import { runAllAccounts } from "../cluster/runCluster";
+import { runAllAccountsWithPrewarmedBrowsers } from "../cluster/runCluster";
 import Schedule, { ISchedule } from "../models/scheduleSchema";
 import User from "../models/userSchema";
+import Account from "../models/accountSchema";
 import { DateTime } from "luxon";
+import { browserPool } from "../browsers/preWarmedBrowserPool";
 
 interface ActiveSession {
   scheduleId: string;
   targetTime: Date;
   startedAt: Date;
-  userId?: string; // Add userId for better tracking
+  userId?: string;
+  retryCount: number;
+  maxRetries: number;
+  lastAttemptTime?: Date;
+  status: "monitoring" | "processing" | "paused" | "retrying";
 }
 
 class ExamScheduler {
@@ -17,45 +23,37 @@ class ExamScheduler {
   private schedulerInterval: NodeJS.Timeout | null = null;
   private isRunning = false;
 
-  /**
-   * Starts the main scheduler
-   */
   start(): void {
     if (this.isRunning) {
-      console.log("⚠️ Scheduler is already running");
+      console.log("⚠️ Scheduler already running");
       return;
     }
 
-    console.log("🚀 Starting exam scheduler...");
+    console.log("🚀 Starting optimized scheduler...");
     this.isRunning = true;
 
-    // Main scheduler loop - runs every 30 seconds for better responsiveness
     this.schedulerInterval = setInterval(async () => {
       try {
         await this.checkAndStartMonitoring();
       } catch (error) {
         console.error("❌ Scheduler error:", error);
       }
-    }, 30000); // Check every 30 seconds
+    }, 20000);
 
-    // Initial check on startup
     this.checkAndStartMonitoring().catch((error) => {
-      console.error("❌ Initial scheduler check failed:", error);
+      console.error("❌ Initial check failed:", error);
     });
 
-    console.log("✅ Exam scheduler started successfully");
+    console.log("✅ Optimized scheduler started");
   }
 
-  /**
-   * Stops the scheduler
-   */
   stop(): void {
     if (!this.isRunning) {
-      console.log("⚠️ Scheduler is not running");
+      console.log("⚠️ Scheduler not running");
       return;
     }
 
-    console.log("🛑 Stopping exam scheduler...");
+    console.log("🛑 Stopping scheduler...");
 
     if (this.schedulerInterval) {
       clearInterval(this.schedulerInterval);
@@ -63,35 +61,28 @@ class ExamScheduler {
     }
 
     this.isRunning = false;
-    console.log("✅ Exam scheduler stopped");
+    console.log("✅ Scheduler stopped");
   }
 
-  /**
-   * Checks for schedules that need monitoring and starts them
-   */
   private async checkAndStartMonitoring(): Promise<void> {
     try {
       const nowUtc = DateTime.utc().toJSDate();
-
-      // Monitoring starts 2 minutes from now (UTC)
       const monitoringStartTimeUtc = DateTime.utc()
-        .plus({ minutes: 2 })
+        .plus({ minutes: 5 })
         .toJSDate();
-      // Find schedules that need monitoring to start (2 minutes before exam time)
+
       const schedulesToMonitor = await Schedule.find({
         runAt: {
-          $gte: nowUtc, // Exam time is in the future
-          $lte: monitoringStartTimeUtc, // But monitoring should start within 2 minutes
+          $gte: nowUtc,
+          $lte: monitoringStartTimeUtc,
         },
         completed: false,
-        status: { $ne: "running" }, // Not already running
-        monitoringStarted: { $ne: true }, // Not already monitoring
+        status: { $nin: ["running", "paused"] },
+        monitoringStarted: { $ne: true },
       }).populate("createdBy");
 
       if (schedulesToMonitor.length > 0) {
-        console.log(
-          `🔍 Found ${schedulesToMonitor.length} schedules ready for monitoring`
-        );
+        console.log(`🔍 Found ${schedulesToMonitor.length} schedules ready`);
       }
 
       for (const schedule of schedulesToMonitor) {
@@ -99,41 +90,44 @@ class ExamScheduler {
           await this.startMonitoringForSchedule(schedule);
         } catch (error) {
           console.error(
-            `❌ Failed to start monitoring for schedule ${schedule._id}:`,
+            `❌ Failed to start monitoring ${schedule._id}:`,
             error
           );
           await this.updateScheduleWithError(
             schedule.id,
             error,
-            "Failed to start monitoring"
+            "Failed to start"
           );
         }
       }
 
-      // Clean up completed monitoring sessions
+      await this.checkForAutomaticRetries();
       await this.cleanupCompletedSessions();
     } catch (error) {
       console.error("❌ Error checking schedules:", error);
     }
   }
 
-  /**
-   * Starts monitoring for a specific schedule
-   */
-  private async startMonitoringForSchedule(schedule: ISchedule): Promise<void> {
+  private async startMonitoringForSchedule(
+    schedule: ISchedule,
+    isRetry: boolean = false
+  ): Promise<void> {
     const scheduleId = schedule.id.toString();
 
-    // Check if already monitoring this schedule
     if (this.activeMonitoringSessions.has(scheduleId)) {
-      console.log(
-        `⚠️ Already monitoring schedule ${schedule.name} (${scheduleId})`
-      );
-      return;
+      const session = this.activeMonitoringSessions.get(scheduleId)!;
+      if (session.status === "paused") {
+        console.log(`🔄 Resuming ${schedule.name}`);
+        session.status = "monitoring";
+      } else {
+        console.log(`⚠️ Already monitoring ${schedule.name}`);
+        return;
+      }
     }
 
     const user = await User.findById(schedule.createdBy);
     if (!user) {
-      console.error(`❌ User not found for schedule ${schedule.name}`);
+      console.error(`❌ User not found for ${schedule.name}`);
       await this.updateScheduleWithError(
         scheduleId,
         "User not found",
@@ -142,148 +136,346 @@ class ExamScheduler {
       return;
     }
 
-    // Send notification to user that monitoring is starting
-    await this.sendLogToUser(
-      user.telegramId,
-      `🚀 **Monitoring Started**\n` +
-        `📝 Schedule: ${schedule.name}\n` +
-        `📅 Exam time: ${schedule.runAt.toLocaleString()}\n` +
-        `🔄 Status: Starting to monitor for available slots...`
-    );
+    const retryCount = (schedule as any).retryCount || 0;
+    const maxRetries = (schedule as any).maxRetries || 5;
 
-    console.log(`🎯 Starting monitoring for schedule: ${schedule.name}`);
-    console.log(`📅 Target exam time: ${schedule.runAt.toLocaleString()}`);
+    // 🔥 START PRE-WARMING BROWSERS IMMEDIATELY
+    const accountCount = await Account.countDocuments({
+      user: user.id,
+      status: true,
+    });
 
-    // Mark as monitoring started in database
+    if (accountCount > 0) {
+      console.log(
+        `🔥 Pre-warming ${accountCount} browsers while monitoring...`
+      );
+      browserPool.warmupBrowsersForUser(user.id).catch((error) => {
+        console.error("❌ Browser pre-warming failed:", error);
+      });
+    }
+
+    if (isRetry) {
+      await this.sendLogToUser(
+        user.telegramId,
+        `🔄 **Retry Attempt ${retryCount + 1}/${maxRetries}**\n` +
+          `📋 Schedule: ${schedule.name}\n` +
+          `📅 Target: ${schedule.runAt.toLocaleString()}\n` +
+          `🔥 Pre-warming ${accountCount} browsers...\n` +
+          `⚡ Starting fast monitoring...`
+      );
+    } else {
+      await this.sendLogToUser(
+        user.telegramId,
+        `🚀 **Fast Monitoring Started**\n` +
+          `📋 Schedule: ${schedule.name}\n` +
+          `📅 Target: ${schedule.runAt.toLocaleString()}\n` +
+          `🔥 Pre-warming ${accountCount} browsers in background...\n` +
+          `⚡ Polling API every 3 seconds\n` +
+          `🔁 Retries available: ${maxRetries}`
+      );
+    }
+
+    console.log(`🎯 Starting monitoring: ${schedule.name}`);
+
     await Schedule.findByIdAndUpdate(schedule._id, {
       status: "running",
       monitoringStarted: true,
-      lastError: null, // Clear any previous errors
+      lastError: null,
+      retryCount: isRetry ? retryCount + 1 : retryCount,
+      lastAttemptTime: new Date(),
     });
 
-    // Track the session
     this.activeMonitoringSessions.set(scheduleId, {
       scheduleId,
       targetTime: schedule.runAt,
       startedAt: new Date(),
       userId: user.telegramId,
+      retryCount: isRetry ? retryCount + 1 : retryCount,
+      maxRetries,
+      status: "monitoring",
     });
 
     try {
-      // Start polling for this specific schedule
       await examMonitor.startPolling(schedule.runAt, {
-        interval: 5000, // Poll every 5 seconds
-        maxDurationMs: 30 * 60 * 1000, // Poll for maximum 30 minutes
+        interval: 3000,
+        maxDurationMs: 30 * 60 * 1000,
         onExamFound: async (exam) => {
-          console.log(`📋 [${schedule.name}] Exam detected:`, {
-            modules: exam.modules?.length,
-            hasOid: !!exam.oid,
-            scheduleId: scheduleId,
-          });
+          console.log(`📋 [${schedule.name}] Exam detected (no OID yet)`);
 
-          // Notify user that exam was found but waiting for OID
+          const status = browserPool.getStatus();
+
           await this.sendLogToUser(
             user.telegramId,
-            `📋 **Exam Found**\n` +
-              `📝 Schedule: ${schedule.name}\n` +
-              `✅ Exam slot detected with ${
-                exam.modules?.length || 0
-              } modules\n` +
-              `⏳ Waiting for booking to become available...`
+            `📋 **Exam Detected**\n` +
+              `📋 Schedule: ${schedule.name}\n` +
+              `✅ Found exam with ${exam.modules?.length || 0} modules\n` +
+              `🔥 Browsers ready: ${status.readyBrowsers}/${accountCount}\n` +
+              `⏳ Waiting for OID...`
           );
         },
         onExamWithOid: async (exam) => {
-          console.log(
-            `🎯 [${schedule.name}] Processing exam with OID:`,
-            exam.oid
-          );
+          const session = this.activeMonitoringSessions.get(scheduleId);
+          if (!session || session.status === "paused") {
+            console.log(`⏸️ ${schedule.name} paused, skipping`);
+            return;
+          }
 
-          // Notify user that OID is found and automation is starting
+          session.status = "processing";
+          console.log(`⚡ OID FOUND: ${exam.oid}`);
+
+          const status = browserPool.getStatus();
+
+          if (status.readyBrowsers > 0) {
+            console.log(
+              `🎯 ${status.readyBrowsers} PRE-WARMED BROWSERS READY - INSTANT START!`
+            );
+          } else {
+            console.warn(`⚠️ Browsers not ready yet, will create on-the-fly`);
+          }
+
           await this.sendLogToUser(
             user.telegramId,
-            `🎯 **Booking Available!**\n` +
-              `📝 Schedule: ${schedule.name}\n` +
+            `🎯 **OID FOUND - INSTANT PROCESSING!**\n` +
+              `📋 Schedule: ${schedule.name}\n` +
               `🆔 OID: ${exam.oid}\n` +
-              `🤖 Starting automated booking process...`
+              `🔥 Pre-warmed browsers: ${status.readyBrowsers}/${accountCount}\n` +
+              `⚡ Starting booking NOW...`
           );
 
           try {
             if (exam.oid) {
-              // Run your booking automation
-              await runAllAccounts(exam.oid, schedule.id);
-              // Note: Success notification is handled in runAllAccounts
-            } else {
-              const errorMsg = "No OID found on exam";
-              console.log(`❌ [${schedule.name}] ${errorMsg}`);
-              await this.updateScheduleWithError(
-                scheduleId,
-                errorMsg,
-                "OID validation failed"
-              );
+              await runAllAccountsWithPrewarmedBrowsers(exam.oid, schedule.id);
+
+              await Schedule.findByIdAndUpdate(scheduleId, {
+                completed: true,
+                status: "success",
+                lastRun: new Date(),
+              });
             }
           } catch (automationError) {
-            console.error(
-              `❌ [${schedule.name}] Automation failed:`,
-              automationError
-            );
-            await this.updateScheduleWithError(
+            console.error(`❌ Automation failed:`, automationError);
+            await this.handleScheduleFailure(
               scheduleId,
               automationError,
-              "Automation failed"
+              user.telegramId
             );
           }
 
-          // Remove from active sessions
           this.activeMonitoringSessions.delete(scheduleId);
         },
         onTimeout: async () => {
-          // Handle timeout - no exam found within 30 minutes
-          console.log(
-            `⏰ [${schedule.name}] Polling timeout - no exam found within 30 minutes`
+          console.log(`⏰ [${schedule.name}] Timeout - no exam found`);
+          await browserPool.closeAllBrowsers();
+          await this.handleScheduleFailure(
+            scheduleId,
+            "No exam found within 30 minutes",
+            user.telegramId
           );
-
-          await this.sendLogToUser(
-            user.telegramId,
-            `⏰ **Schedule Timeout**\n` +
-              `📝 Schedule: ${schedule.name}\n` +
-              `❌ No exam slots found within 5 hours\n` +
-              `💡 The exam might not be available yet. You can create a new schedule to try again later.`
-          );
-
-          // Update schedule status
-          await Schedule.findByIdAndUpdate(scheduleId, {
-            status: "failed",
-            completed: true,
-            lastError: "No exam found within 30 minute monitoring window",
-            lastRun: new Date(),
-          });
-
-          // Remove from active sessions
-          this.activeMonitoringSessions.delete(scheduleId);
         },
         stopOnFirstOid: true,
       });
-    } catch (monitoringError) {
-      console.error(
-        `❌ Failed to start polling for schedule ${schedule.name}:`,
-        monitoringError
-      );
-
-      // Remove from active sessions and update database
+    } catch (error) {
+      console.error(`❌ Failed polling ${schedule.name}:`, error);
+      await browserPool.closeAllBrowsers();
       this.activeMonitoringSessions.delete(scheduleId);
-      await this.updateScheduleWithError(
-        scheduleId,
-        monitoringError,
-        "Failed to start polling"
-      );
-
-      throw monitoringError;
+      await this.handleScheduleFailure(scheduleId, error, user.telegramId);
+      throw error;
     }
   }
 
-  /**
-   * Helper method to update schedule with error and notify user
-   */
+  private async handleScheduleFailure(
+    scheduleId: string,
+    error: any,
+    telegramId: string
+  ): Promise<void> {
+    const schedule = await Schedule.findById(scheduleId);
+    if (!schedule) return;
+
+    const session = this.activeMonitoringSessions.get(scheduleId);
+    const retryCount = session?.retryCount || (schedule as any).retryCount || 0;
+    const maxRetries = session?.maxRetries || (schedule as any).maxRetries || 5;
+
+    const errorMessage =
+      (error as any).message || error.toString() || "Unknown error";
+
+    if (retryCount < maxRetries) {
+      await Schedule.findByIdAndUpdate(scheduleId, {
+        status: "failed",
+        monitoringStarted: false,
+        lastError: errorMessage,
+        lastRun: new Date(),
+        retryCount: retryCount,
+      });
+
+      await this.sendLogToUser(
+        telegramId,
+        `⚠️ **Attempt Failed - Will Retry**\n` +
+          `📋 Schedule: ${schedule.name}\n` +
+          `❌ Error: ${errorMessage}\n` +
+          `🔁 Retry ${retryCount + 1}/${maxRetries}\n\n` +
+          `⏰ Auto-retry in 2 minutes\n` +
+          `Or use /retry_${scheduleId} now`
+      );
+
+      this.activeMonitoringSessions.delete(scheduleId);
+    } else {
+      await Schedule.findByIdAndUpdate(scheduleId, {
+        completed: true,
+        status: "failed",
+        lastError: `Max retries (${maxRetries}) reached: ${errorMessage}`,
+        lastRun: new Date(),
+      });
+
+      await this.sendLogToUser(
+        telegramId,
+        `❌ **Schedule Failed - Max Retries**\n` +
+          `📋 Schedule: ${schedule.name}\n` +
+          `🚨 Error: ${errorMessage}\n` +
+          `🔁 Attempts: ${retryCount}/${maxRetries}`
+      );
+
+      this.activeMonitoringSessions.delete(scheduleId);
+    }
+  }
+
+  private async checkForAutomaticRetries(): Promise<void> {
+    try {
+      const readyForRetry = await Schedule.find({
+        completed: false,
+        status: "failed",
+        $expr: { $lt: ["$retryCount", "$maxRetries"] },
+      }).populate("createdBy");
+
+      if (readyForRetry.length > 0) {
+        console.log(
+          `🔄 Found ${readyForRetry.length} schedules for auto-retry`
+        );
+      }
+
+      for (const schedule of readyForRetry) {
+        try {
+          if (schedule.lastAttemptTime) {
+            const timeSince = Date.now() - schedule.lastAttemptTime.getTime();
+            const minWait = 2 * 60 * 1000;
+
+            if (timeSince < minWait) {
+              continue;
+            }
+          }
+
+          if (this.activeMonitoringSessions.has(schedule.id.toString())) {
+            continue;
+          }
+
+          console.log(`🔄 Auto-retrying: ${schedule.name}`);
+
+          const user = schedule.createdBy as any;
+          if (user?.telegramId) {
+            await this.sendLogToUser(
+              user.telegramId,
+              `🔄 **Auto-Retry Starting**\n` +
+                `📋 ${schedule.name}\n` +
+                `🔁 Attempt ${(schedule.retryCount || 0) + 1}/${
+                  schedule.maxRetries || 5
+                }`
+            );
+          }
+
+          await this.startMonitoringForSchedule(schedule, true);
+        } catch (error) {
+          console.error(`❌ Auto-retry failed for ${schedule.name}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error("❌ Error checking auto-retries:", error);
+    }
+  }
+
+  async retrySchedule(scheduleId: string): Promise<void> {
+    try {
+      const schedule = await Schedule.findById(scheduleId).populate(
+        "createdBy"
+      );
+      if (!schedule) {
+        throw new Error(`Schedule ${scheduleId} not found`);
+      }
+
+      const retryCount = (schedule as any).retryCount || 0;
+      const maxRetries = (schedule as any).maxRetries || 5;
+
+      if (retryCount >= maxRetries) {
+        throw new Error(`Max retries (${maxRetries}) reached`);
+      }
+
+      await Schedule.findByIdAndUpdate(scheduleId, {
+        status: "pending",
+        monitoringStarted: false,
+        lastError: null,
+      });
+
+      if (this.activeMonitoringSessions.has(scheduleId)) {
+        this.activeMonitoringSessions.delete(scheduleId);
+        await examMonitor.stopPolling();
+      }
+
+      await this.startMonitoringForSchedule(schedule, true);
+      console.log(`✅ Manual retry initiated for ${scheduleId}`);
+    } catch (error) {
+      console.error(`❌ Manual retry failed for ${scheduleId}:`, error);
+      throw error;
+    }
+  }
+
+  async pauseSchedule(scheduleId: string): Promise<void> {
+    const session = this.activeMonitoringSessions.get(scheduleId);
+    if (session) {
+      session.status = "paused";
+    }
+
+    await Schedule.findByIdAndUpdate(scheduleId, { status: "paused" });
+
+    const schedule = await Schedule.findById(scheduleId).populate("createdBy");
+    if (schedule?.createdBy) {
+      const user = schedule.createdBy as any;
+      if (user.telegramId) {
+        await this.sendLogToUser(
+          user.telegramId,
+          `⏸️ **Schedule Paused**\n📋 ${schedule.name}`
+        );
+      }
+    }
+  }
+
+  async resumeSchedule(scheduleId: string): Promise<void> {
+    const schedule = await Schedule.findById(scheduleId).populate("createdBy");
+    if (!schedule || schedule.status !== "paused") {
+      throw new Error("Schedule not paused");
+    }
+
+    await Schedule.findByIdAndUpdate(scheduleId, {
+      status: "pending",
+      monitoringStarted: false,
+    });
+
+    await this.startMonitoringForSchedule(schedule, false);
+  }
+
+  async stopSchedule(scheduleId: string): Promise<void> {
+    const session = this.activeMonitoringSessions.get(scheduleId);
+    if (session) {
+      this.activeMonitoringSessions.delete(scheduleId);
+    }
+
+    await browserPool.closeAllBrowsers();
+
+    await Schedule.findByIdAndUpdate(scheduleId, {
+      completed: true,
+      status: "stopped",
+      lastError: "Stopped by user",
+      lastRun: new Date(),
+    });
+  }
+
   private async updateScheduleWithError(
     scheduleId: string,
     error: any,
@@ -298,27 +490,8 @@ class ExamScheduler {
       lastError: `${context}: ${errorMessage}`,
       lastRun: new Date(),
     });
-
-    // Get user and send error notification
-    const schedule = await Schedule.findById(scheduleId).populate("createdBy");
-    if (schedule?.createdBy) {
-      const user = schedule.createdBy as any;
-      if (user.telegramId) {
-        await this.sendLogToUser(
-          user.telegramId,
-          `❌ **Schedule Error**\n` +
-            `📝 Schedule: ${schedule.name}\n` +
-            `🚨 Error: ${context}\n` +
-            `💬 Details: ${errorMessage}\n` +
-            `⏰ Time: ${new Date().toLocaleString()}`
-        );
-      }
-    }
   }
 
-  /**
-   * Helper method to send log messages to users
-   */
   private async sendLogToUser(
     telegramId: string,
     message: string
@@ -326,13 +499,10 @@ class ExamScheduler {
     try {
       await bot.sendMessage(telegramId, message, { parse_mode: "Markdown" });
     } catch (error) {
-      console.error(`❌ Failed to send log to user ${telegramId}:`, error);
+      console.error(`❌ Failed to send to ${telegramId}:`, error);
     }
   }
 
-  /**
-   * Cleans up expired or completed monitoring sessions
-   */
   private async cleanupCompletedSessions(): Promise<void> {
     const now = new Date();
     const expiredSessions: string[] = [];
@@ -341,73 +511,22 @@ class ExamScheduler {
       scheduleId,
       session,
     ] of this.activeMonitoringSessions.entries()) {
-      // If the target time has passed by more than 30 minutes, consider it expired
       const expiryTime = new Date(
         session.targetTime.getTime() + 30 * 60 * 1000
       );
 
-      if (now > expiryTime) {
+      if (now > expiryTime && session.status !== "processing") {
         expiredSessions.push(scheduleId);
-        console.log(
-          `🧹 Cleaning up expired monitoring session for schedule ${scheduleId}`
-        );
       }
     }
 
-    // Remove expired sessions
     for (const scheduleId of expiredSessions) {
-      const session = this.activeMonitoringSessions.get(scheduleId);
       this.activeMonitoringSessions.delete(scheduleId);
-
-      // Update database to reflect that monitoring is no longer active
-      try {
-        await Schedule.findByIdAndUpdate(scheduleId, {
-          status: "failed",
-          lastError: "Monitoring session expired - exam time has passed",
-          lastRun: new Date(),
-        });
-
-        // Notify user about expiration
-        if (session?.userId) {
-          const schedule = await Schedule.findById(scheduleId);
-          if (schedule) {
-            await this.sendLogToUser(
-              session.userId,
-              `⏰ **Schedule Expired**\n` +
-                `📝 Schedule: ${schedule.name}\n` +
-                `❌ Monitoring stopped - exam time has passed\n` +
-                `💡 You can create a new schedule for future exams.`
-            );
-          }
-        }
-      } catch (error) {
-        console.error(
-          `❌ Failed to update expired schedule ${scheduleId}:`,
-          error
-        );
-      }
-    }
-
-    if (expiredSessions.length > 0) {
-      console.log(
-        `🧹 Cleaned up ${expiredSessions.length} expired monitoring sessions`
-      );
+      await this.handleScheduleFailure(scheduleId, "Session expired", "");
     }
   }
 
-  /**
-   * Gets the status of all active monitoring sessions
-   */
-  getStatus(): {
-    isRunning: boolean;
-    activeSessions: number;
-    sessions: Array<{
-      scheduleId: string;
-      targetTime: string;
-      startedAt: string;
-      runningFor: string;
-    }>;
-  } {
+  getStatus(): any {
     const now = new Date();
     const sessions = Array.from(this.activeMonitoringSessions.values()).map(
       (session) => ({
@@ -417,6 +536,9 @@ class ExamScheduler {
         runningFor: `${Math.round(
           (now.getTime() - session.startedAt.getTime()) / 1000
         )}s`,
+        status: session.status,
+        retryCount: session.retryCount,
+        maxRetries: session.maxRetries,
       })
     );
 
@@ -427,98 +549,29 @@ class ExamScheduler {
     };
   }
 
-  /**
-   * Emergency stop all monitoring sessions
-   */
   async stopAllMonitoring(): Promise<void> {
-    console.log(
-      `🛑 Emergency stop: Stopping ${this.activeMonitoringSessions.size} active monitoring sessions`
-    );
-
-    // Notify all users before stopping
-    for (const [
-      scheduleId,
-      session,
-    ] of this.activeMonitoringSessions.entries()) {
-      if (session.userId) {
-        const schedule = await Schedule.findById(scheduleId);
-        if (schedule) {
-          await this.sendLogToUser(
-            session.userId,
-            `🛑 **System Shutdown**\n` +
-              `📝 Schedule: ${schedule.name}\n` +
-              `⚠️ Monitoring stopped due to system shutdown\n` +
-              `💡 Your schedule will resume when the system restarts.`
-          );
-        }
-      }
-    }
-
-    // Stop the exam monitor
+    console.log(`🛑 Stopping ${this.activeMonitoringSessions.size} sessions`);
     examMonitor.destroy();
-
-    // Clear all active sessions
+    await browserPool.closeAllBrowsers();
     this.activeMonitoringSessions.clear();
-
-    // Reset monitoring flags in database
-    try {
-      await Schedule.updateMany(
-        { monitoringStarted: true, completed: false },
-        {
-          $unset: { monitoringStarted: 1 },
-          status: "pending", // Reset to pending so they can be picked up again
-          lastError: "Monitoring stopped by system shutdown",
-        }
-      );
-    } catch (error) {
-      console.error("❌ Failed to reset monitoring flags:", error);
-    }
   }
 
-  /**
-   * Manually trigger monitoring for a specific schedule (useful for testing)
-   */
   async triggerSchedule(scheduleId: string): Promise<void> {
-    try {
-      const schedule = await Schedule.findById(scheduleId).populate(
-        "createdBy"
-      );
-      if (!schedule) {
-        throw new Error(`Schedule ${scheduleId} not found`);
-      }
-
-      if (schedule.completed) {
-        throw new Error(`Schedule ${scheduleId} is already completed`);
-      }
-
-      // Reset schedule status
-      await Schedule.findByIdAndUpdate(scheduleId, {
-        status: "pending",
-        monitoringStarted: false,
-        lastError: null,
-      });
-
-      await this.startMonitoringForSchedule(schedule);
-      console.log(
-        `✅ Manually triggered monitoring for schedule ${scheduleId}`
-      );
-    } catch (error) {
-      console.error(
-        `❌ Failed to manually trigger schedule ${scheduleId}:`,
-        error
-      );
-      throw error;
+    const schedule = await Schedule.findById(scheduleId).populate("createdBy");
+    if (!schedule || schedule.completed) {
+      throw new Error("Schedule not found or completed");
     }
+
+    await Schedule.findByIdAndUpdate(scheduleId, {
+      status: "pending",
+      monitoringStarted: false,
+      lastError: null,
+    });
+
+    await this.startMonitoringForSchedule(schedule);
   }
 
-  /**
-   * Get detailed information about a specific schedule
-   */
-  async getScheduleInfo(scheduleId: string): Promise<{
-    schedule: ISchedule | null;
-    isMonitoring: boolean;
-    session?: ActiveSession;
-  }> {
+  async getScheduleInfo(scheduleId: string): Promise<any> {
     const schedule = await Schedule.findById(scheduleId).populate("createdBy");
     const session = this.activeMonitoringSessions.get(scheduleId);
 
@@ -528,39 +581,18 @@ class ExamScheduler {
       session,
     };
   }
-
-  /**
-   * Send schedule logs to user (public method)
-   */
-  async sendScheduleLog(scheduleId: string, message: string): Promise<void> {
-    try {
-      const schedule = await Schedule.findById(scheduleId).populate(
-        "createdBy"
-      );
-      if (schedule?.createdBy) {
-        const user = schedule.createdBy as any;
-        if (user.telegramId) {
-          await this.sendLogToUser(user.telegramId, message);
-        }
-      }
-    } catch (error) {
-      console.error(`❌ Failed to send schedule log for ${scheduleId}:`, error);
-    }
-  }
 }
 
-// Create and export singleton instance
 const examScheduler = new ExamScheduler();
 
-// Graceful shutdown handling
 process.on("SIGINT", async () => {
-  console.log("\n🛑 Received SIGINT, shutting down scheduler gracefully...");
+  console.log("\n🛑 SIGINT - shutting down...");
   examScheduler.stop();
   await examScheduler.stopAllMonitoring();
 });
 
 process.on("SIGTERM", async () => {
-  console.log("\n🛑 Received SIGTERM, shutting down scheduler gracefully...");
+  console.log("\n🛑 SIGTERM - shutting down...");
   examScheduler.stop();
   await examScheduler.stopAllMonitoring();
 });

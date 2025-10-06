@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
 export interface UserDocument extends Document {
+  _id: mongoose.Types.ObjectId;
   telegramId: string;
   username?: string;
 }

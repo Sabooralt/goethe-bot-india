@@ -7,7 +7,6 @@ import Account from "./models/accountSchema";
 import Schedule from "./models/scheduleSchema";
 import { examScheduler } from "./schedulers/scheduler";
 import { DateTime } from "luxon";
-import { stopAllSchedules } from "./cluster/runCluster";
 
 dotenv.config();
 
@@ -252,6 +251,247 @@ export const bot = new TelegramBot(token, { polling: true });
     if (!userId || !scheduleId) return;
 
     await handleDeleteSchedule(chatId, userId, scheduleId);
+  });
+  bot.onText(/\/retry_(.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id?.toString();
+    const scheduleId = match?.[1];
+
+    if (!userId || !scheduleId) return;
+
+    try {
+      await bot.sendMessage(chatId, "🔄 Retrying schedule...");
+
+      const schedule = await Schedule.findById(scheduleId);
+      if (!schedule) {
+        await bot.sendMessage(chatId, "❌ Schedule not found.");
+        return;
+      }
+
+      const user = await User.findOne({ telegramId: userId });
+      if (!user || schedule.createdBy.toString() !== user._id.toString()) {
+        await bot.sendMessage(
+          chatId,
+          "❌ You don't have permission to view this schedule."
+        );
+        return;
+      }
+
+      const info = await examScheduler.getScheduleInfo(scheduleId);
+
+      let statusMessage = `📊 **Schedule Status**\n\n`;
+      statusMessage += `📋 **Name:** ${schedule.name}\n`;
+      statusMessage += `🆔 **ID:** \`${scheduleId}\`\n`;
+      statusMessage += `📅 **Target Time:** ${schedule.runAt.toLocaleString()}\n`;
+      statusMessage += `📌 **Status:** ${schedule.status}\n`;
+      statusMessage += `✅ **Completed:** ${
+        schedule.completed ? "Yes" : "No"
+      }\n`;
+      statusMessage += `🔄 **Monitoring Active:** ${
+        info.isMonitoring ? "Yes" : "No"
+      }\n`;
+
+      if ((schedule as any).retryCount !== undefined) {
+        statusMessage += `🔁 **Retry Count:** ${(schedule as any).retryCount}/${
+          (schedule as any).maxRetries || 5
+        }\n`;
+      }
+
+      if (schedule.lastRun) {
+        statusMessage += `⏰ **Last Run:** ${schedule.lastRun.toLocaleString()}\n`;
+      }
+
+      if (schedule.lastError) {
+        statusMessage += `❌ **Last Error:** ${schedule.lastError}\n`;
+      }
+
+      if (info.session) {
+        statusMessage += `\n**Active Session Info:**\n`;
+        statusMessage += `⏱️ **Session Status:** ${info.session.status}\n`;
+        statusMessage += `🕐 **Started At:** ${info.session.startedAt.toLocaleString()}\n`;
+        const runningTime = Math.round(
+          (Date.now() - info.session.startedAt.getTime()) / 1000
+        );
+        statusMessage += `⏲️ **Running For:** ${runningTime}s\n`;
+      }
+
+      statusMessage += `\n**Available Commands:**\n`;
+
+      if (schedule.status === "failed" && !schedule.completed) {
+        statusMessage += `• /retry_${scheduleId} - Retry booking\n`;
+      }
+
+      if (info.isMonitoring && info.session?.status !== "paused") {
+        statusMessage += `• /pause_${scheduleId} - Pause monitoring\n`;
+      }
+
+      if (schedule.status === "paused") {
+        statusMessage += `• /resume_${scheduleId} - Resume monitoring\n`;
+      }
+
+      if (!schedule.completed) {
+        statusMessage += `• /stop_${scheduleId} - Stop completely\n`;
+      }
+
+      await bot.sendMessage(chatId, statusMessage, { parse_mode: "Markdown" });
+    } catch (error) {
+      console.error("Error getting schedule status:", error);
+      await bot.sendMessage(
+        chatId,
+        `❌ Failed to get schedule status: ${(error as Error).message}`
+      );
+    }
+  });
+
+  bot.onText(/\/schedulehelp/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    const helpMessage =
+      `📚 **Schedule Control Commands**\n\n` +
+      `**Basic Commands:**\n` +
+      `• \`/status_<scheduleId>\` - View schedule status\n` +
+      `• \`/retry_<scheduleId>\` - Retry a failed schedule\n` +
+      `• \`/pause_<scheduleId>\` - Pause monitoring\n` +
+      `• \`/resume_<scheduleId>\` - Resume paused monitoring\n` +
+      `• \`/stop_<scheduleId>\` - Stop schedule completely\n\n` +
+      `**How Retries Work:**\n` +
+      `• Each schedule has a maximum of 5 retry attempts\n` +
+      `• Failed schedules can be retried manually or automatically\n` +
+      `• Use /retry command to immediately retry a failed schedule\n` +
+      `• Check retry count with /status command\n\n` +
+      `**Schedule States:**\n` +
+      `• **pending** - Waiting to start\n` +
+      `• **running** - Currently monitoring/processing\n` +
+      `• **paused** - Temporarily paused\n` +
+      `• **failed** - Failed (can retry)\n` +
+      `• **success** - Completed successfully\n` +
+      `• **stopped** - Manually stopped\n\n` +
+      `**Tips:**\n` +
+      `• You can pause a schedule and resume it later\n` +
+      `• Failed schedules show available commands in status\n` +
+      `• Copy schedule ID from "View schedules" menu`;
+
+    await bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
+  });
+
+  bot.onText(/\/pause_(.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id?.toString();
+    const scheduleId = match?.[1];
+
+    if (!userId || !scheduleId) return;
+
+    try {
+      await bot.sendMessage(chatId, "⏸️ Pausing schedule...");
+
+      const schedule = await Schedule.findById(scheduleId);
+      if (!schedule) {
+        await bot.sendMessage(chatId, "❌ Schedule not found.");
+        return;
+      }
+
+      const user = await User.findOne({ telegramId: userId });
+      if (!user || schedule.createdBy.toString() !== user._id.toString()) {
+        await bot.sendMessage(
+          chatId,
+          "❌ You don't have permission to pause this schedule."
+        );
+        return;
+      }
+
+      await examScheduler.pauseSchedule(scheduleId);
+      await bot.sendMessage(
+        chatId,
+        `⏸️ Schedule "${schedule.name}" paused successfully!\n\n` +
+          `Use /resume_${scheduleId} to resume.`
+      );
+    } catch (error) {
+      console.error("Error pausing schedule:", error);
+      await bot.sendMessage(
+        chatId,
+        `❌ Failed to pause schedule: ${(error as Error).message}`
+      );
+    }
+  });
+
+  // Resume schedule command
+  bot.onText(/\/resume_(.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id?.toString();
+    const scheduleId = match?.[1];
+
+    if (!userId || !scheduleId) return;
+
+    try {
+      await bot.sendMessage(chatId, "▶️ Resuming schedule...");
+
+      const schedule = await Schedule.findById(scheduleId);
+      if (!schedule) {
+        await bot.sendMessage(chatId, "❌ Schedule not found.");
+        return;
+      }
+
+      const user = await User.findOne({ telegramId: userId });
+      if (!user || schedule.createdBy.toString() !== user._id.toString()) {
+        await bot.sendMessage(
+          chatId,
+          "❌ You don't have permission to resume this schedule."
+        );
+        return;
+      }
+
+      await examScheduler.resumeSchedule(scheduleId);
+      await bot.sendMessage(
+        chatId,
+        `▶️ Schedule "${schedule.name}" resumed successfully!`
+      );
+    } catch (error) {
+      console.error("Error resuming schedule:", error);
+      await bot.sendMessage(
+        chatId,
+        `❌ Failed to resume schedule: ${(error as Error).message}`
+      );
+    }
+  });
+
+  // Stop schedule command
+  bot.onText(/\/stop_(.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id?.toString();
+    const scheduleId = match?.[1];
+
+    if (!userId || !scheduleId) return;
+
+    try {
+      await bot.sendMessage(chatId, "🛑 Stopping schedule...");
+
+      const schedule = await Schedule.findById(scheduleId);
+      if (!schedule) {
+        await bot.sendMessage(chatId, "❌ Schedule not found.");
+        return;
+      }
+
+      const user = await User.findOne({ telegramId: userId });
+      if (!user || schedule.createdBy.toString() !== user._id.toString()) {
+        await bot.sendMessage(
+          chatId,
+          "❌ You don't have permission to stop this schedule."
+        );
+        return;
+      }
+
+      await examScheduler.stopSchedule(scheduleId);
+      await bot.sendMessage(
+        chatId,
+        `🛑 Schedule "${schedule.name}" stopped completely.`
+      );
+    } catch (error) {
+      console.error("Error stopping schedule:", error);
+      await bot.sendMessage(
+        chatId,
+        `❌ Failed to stop schedule: ${(error as Error).message}`
+      );
+    }
   });
 
   bot.on("message", async (msg) => {
@@ -1046,44 +1286,128 @@ export const bot = new TelegramBot(token, { polling: true });
         return;
       }
 
+      // Get all schedules (not just incomplete ones)
       const schedules = await Schedule.find({
         createdBy: user._id,
-        completed: false,
-      }).sort({ runAt: 1 });
+      }).sort({ runAt: -1, createdAt: -1 });
 
       if (schedules.length === 0) {
-        await bot.sendMessage(chatId, "📅 You have no active schedules.");
+        await bot.sendMessage(chatId, "📅 You have no schedules.");
         showMainMenu(chatId, "What would you like to do next?");
         return;
       }
 
-      const scheduleList = schedules
-        .map((schedule, index) => {
+      // Separate active and completed schedules
+      const activeSchedules = schedules.filter((s) => !s.completed);
+      const completedSchedules = schedules.filter((s) => s.completed);
+
+      let messageText = "";
+
+      // Active Schedules
+      if (activeSchedules.length > 0) {
+        messageText += `🔵 **Active Schedules (${activeSchedules.length})**\n\n`;
+
+        for (const [index, schedule] of activeSchedules.entries()) {
           const runTime = schedule.runAt.toLocaleString();
           const lastRun = schedule.lastRun
             ? schedule.lastRun.toLocaleString()
             : "Never";
-          const lastError = schedule.lastError ? schedule.lastError : "None";
-          return (
-            `${index + 1}. **${schedule.name}**\n` +
-            `   ⏰ **Runs at:** ${runTime}\n` +
-            `   🆔 **ID:** \`${schedule._id}\`\n` +
-            `   📝 **Status:** ${
-              schedule.completed ? "Completed" : "Pending"
-            }\n` +
-            `   🔄 *Last Run:* ${lastRun}\n` +
-            `   ⚠️ *Last Error:* ${lastError}\n` +
-            `   📡 *Monitoring:* ${schedule.monitoringStarted ? "Yes" : "No"}`
-          );
-        })
-        .join("\n\n");
+          const retryInfo =
+            schedule.retryCount !== undefined
+              ? `${schedule.retryCount}/${schedule.maxRetries || 5}`
+              : "0/5";
 
-      await bot.sendMessage(
-        chatId,
-        `📅 **Your Active Schedules:**\n\n${scheduleList}\n\n` +
-          `Use "Remove schedule" from the menu to delete a schedule.`,
-        { parse_mode: "Markdown" }
-      );
+          // Status emoji
+          let statusEmoji = "⏳";
+          if (schedule.status === "running") statusEmoji = "🔄";
+          else if (schedule.status === "paused") statusEmoji = "⏸️";
+          else if (schedule.status === "failed") statusEmoji = "❌";
+          else if (schedule.status === "pending") statusEmoji = "⏳";
+
+          messageText += `${index + 1}. ${statusEmoji} **${schedule.name}**\n`;
+          messageText += `   ⏰ **Target:** ${runTime}\n`;
+          messageText += `   🆔 **ID:** \`${schedule._id}\`\n`;
+          messageText += `   📊 **Status:** ${schedule.status || "pending"}\n`;
+          messageText += `   🔁 **Retries:** ${retryInfo}\n`;
+
+          if (schedule.lastRun) {
+            messageText += `   📅 *Last Run:* ${lastRun}\n`;
+          }
+
+          if (schedule.lastError) {
+            const errorPreview =
+              schedule.lastError.length > 50
+                ? schedule.lastError.substring(0, 50) + "..."
+                : schedule.lastError;
+            messageText += `   ⚠️ *Last Error:* ${errorPreview}\n`;
+          }
+
+          messageText += `   🔧 *Monitoring:* ${
+            schedule.monitoringStarted ? "Yes" : "No"
+          }\n`;
+
+          // Quick action commands
+          messageText += `   **Commands:** `;
+          const commands = [];
+
+          if (schedule.status === "failed") {
+            commands.push(`/retry_${schedule._id}`);
+          }
+          if (schedule.status === "running" || schedule.status === "pending") {
+            commands.push(`/pause_${schedule._id}`);
+          }
+          if (schedule.status === "paused") {
+            commands.push(`/resume_${schedule._id}`);
+          }
+          commands.push(`/status_${schedule._id}`);
+          commands.push(`/stop_${schedule._id}`);
+
+          messageText += commands.join(" | ") + "\n\n";
+        }
+      }
+
+      // Completed Schedules (show last 5)
+      if (completedSchedules.length > 0) {
+        messageText += `\n✅ **Completed Schedules (Last ${Math.min(
+          5,
+          completedSchedules.length
+        )})**\n\n`;
+
+        for (const [index, schedule] of completedSchedules
+          .slice(0, 5)
+          .entries()) {
+          const runTime = schedule.runAt.toLocaleString();
+
+          // Status emoji for completed
+          let statusEmoji = "✅";
+          if (schedule.status === "stopped") statusEmoji = "🛑";
+          else if (schedule.status === "failed") statusEmoji = "❌";
+
+          messageText += `${index + 1}. ${statusEmoji} **${schedule.name}**\n`;
+          messageText += `   ⏰ **Target:** ${runTime}\n`;
+          messageText += `   📊 **Final Status:** ${schedule.status}\n`;
+
+          if (schedule.lastRun) {
+            messageText += `   📅 *Completed:* ${schedule.lastRun.toLocaleString()}\n`;
+          }
+
+          messageText += "\n";
+        }
+
+        if (completedSchedules.length > 5) {
+          messageText += `_...and ${
+            completedSchedules.length - 5
+          } more completed schedules_\n\n`;
+        }
+      }
+
+      messageText += `\n💡 **Tips:**\n`;
+      messageText += `• Use /status_<id> to view detailed status\n`;
+      messageText += `• Failed schedules can be retried up to 5 times\n`;
+      messageText += `• Type /schedulehelp for all commands\n`;
+      messageText += `• Use "Remove schedule" to delete schedules`;
+
+      await bot.sendMessage(chatId, messageText, { parse_mode: "Markdown" });
 
       showMainMenu(chatId, "What would you like to do next?");
     } catch (error) {
@@ -1268,7 +1592,6 @@ export const bot = new TelegramBot(token, { polling: true });
   process.on("SIGTERM", async () => {
     console.log("🛑 Caught SIGTERM, cleaning up browsers...");
     bot.stopPolling();
-    await stopAllSchedules();
     mongoose.connection.close();
 
     process.exit(0);
@@ -1277,7 +1600,6 @@ export const bot = new TelegramBot(token, { polling: true });
   process.on("SIGINT", async () => {
     console.log("Shutting down await bot...");
     bot.stopPolling();
-    await stopAllSchedules();
     mongoose.connection.close();
     process.exit(0);
   });

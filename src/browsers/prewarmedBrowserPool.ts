@@ -20,6 +20,7 @@ class PrewarmedBrowserPool {
   private browsers: Map<string, PrewarmedBrowser> = new Map();
   private warmingUp: Set<string> = new Set();
   private displayAllocationLock = Promise.resolve();
+  private preNavigated = false;
 
   private async allocateDisplay(): Promise<string | null> {
     return new Promise((resolve) => {
@@ -60,7 +61,7 @@ class PrewarmedBrowserPool {
         proxy = proxyPool.getNextProxy();
         if (proxy) {
           proxyUrl = `${proxy.host}:${proxy.port}`;
-          console.log(`🔒 Proxy ${proxyUrl} → ${account.email}`);
+          console.log(`🔐 Proxy ${proxyUrl} → ${account.email}`);
         }
       }
 
@@ -100,6 +101,12 @@ class PrewarmedBrowserPool {
         "--disable-extensions",
         "--disable-popup-blocking",
         "--disable-prompt-on-repost",
+        // OPTIMIZED: Aggressive performance flags
+        "--aggressive-cache-discard",
+        "--aggressive-tab-discard",
+        "--disable-component-update",
+        "--disable-field-trial-config",
+        "--disable-background-media-suspend",
       ];
 
       if (proxy) {
@@ -131,25 +138,22 @@ class PrewarmedBrowserPool {
         });
       }
 
-      await page.setViewport({ width: 1920, height: 1080 });
       await page.setDefaultNavigationTimeout(180000);
       await page.setDefaultTimeout(180000);
 
+      // OPTIMIZED: Minimal request interception for speed
       await page.setRequestInterception(true);
       page.on("request", (req) => {
         const resourceType = req.resourceType();
-        if (
-          resourceType === "image" ||
-          resourceType === "font" ||
-          resourceType === "media" ||
-          resourceType === "other"
-        ) {
+        // Only block heavy resources
+        if (resourceType === "image" || resourceType === "media" || resourceType === "font") {
           req.abort();
         } else {
           req.continue();
         }
       });
 
+      // Set cookies and storage
       await page.evaluateOnNewDocument(() => {
         localStorage.setItem(
           "uc_gcm",
@@ -174,8 +178,6 @@ class PrewarmedBrowserPool {
         );
       });
 
-      await page.goto("about:blank", { waitUntil: "domcontentloaded" });
-
       console.log(`✅ Pre-warmed ${account.email}`);
 
       return {
@@ -195,6 +197,36 @@ class PrewarmedBrowserPool {
     }
   }
 
+  // OPTIMIZED: Pre-navigate browsers to Goethe domain for faster connection
+  async preNavigateBrowsers(): Promise<void> {
+    if (this.preNavigated) return;
+    
+    const browsers = this.getAllReadyBrowsers();
+    
+    console.log(`🌐 Pre-navigating ${browsers.length} browsers to goethe.de...`);
+    
+    const navPromises = browsers.map(async (browser) => {
+      try {
+        // Pre-establish connection to Goethe domain
+        await browser.page.goto('https://www.goethe.de/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 10000
+        });
+        console.log(`✅ Pre-navigated browser for ${browser.accountEmail}`);
+        return true;
+      } catch (error) {
+        console.warn(`⚠️ Pre-navigation failed for ${browser.accountEmail}`);
+        return false;
+      }
+    });
+    
+    const results = await Promise.allSettled(navPromises);
+    const successful = results.filter(r => r.status === 'fulfilled' && r.value).length;
+    
+    console.log(`🌐 Pre-navigation complete: ${successful}/${browsers.length} successful`);
+    this.preNavigated = true;
+  }
+
   async warmupBrowsersForUser(userId: string): Promise<void> {
     try {
       console.log(`🔥 Warming browsers for user ${userId}...`);
@@ -211,6 +243,7 @@ class PrewarmedBrowserPool {
 
       console.log(`📊 Warming ${accounts.length} browsers...`);
 
+      // OPTIMIZED: Parallel browser warming
       const warmupPromises = accounts.map(async (account) => {
         if (
           this.warmingUp.has(account.email) ||
@@ -251,9 +284,18 @@ class PrewarmedBrowserPool {
       console.log(
         `🎉 Warming complete! ${this.browsers.size}/${accounts.length} ready`
       );
+      
+      // OPTIMIZED: Pre-navigate all browsers after warming
+      await this.preNavigateBrowsers();
+      
     } catch (error) {
       console.error(`❌ Warmup error:`, error);
     }
+  }
+
+  // OPTIMIZED: Get all ready browsers for simultaneous launch
+  getAllReadyBrowsers(): PrewarmedBrowser[] {
+    return Array.from(this.browsers.values()).filter(b => b.isReady);
   }
 
   getPrewarmedBrowser(accountEmail: string): PrewarmedBrowser | null {
@@ -297,6 +339,7 @@ class PrewarmedBrowserPool {
 
     this.browsers.clear();
     activeDisplays.clear();
+    this.preNavigated = false;
 
     console.log(`✅ All browsers closed`);
   }
@@ -309,6 +352,7 @@ class PrewarmedBrowserPool {
       warmingBrowsers: this.warmingUp.size,
       displays: Array.from(this.browsers.values()).map((b) => b.display),
       accounts: Array.from(this.browsers.keys()),
+      preNavigated: this.preNavigated,
     };
   }
 
@@ -322,3 +366,4 @@ class PrewarmedBrowserPool {
 }
 
 export const browserPool = new PrewarmedBrowserPool();
+export { PrewarmedBrowserPool, PrewarmedBrowser };

@@ -1,11 +1,11 @@
 import { bot } from "..";
 import { examMonitor } from "../api/exam-api-finder";
-import { runAllAccountsWithPrewarmedBrowsers } from "../cluster/runCluster";
+import { runAllAccountsWithPrewarmedBrowsers, ultraFastDirectLaunch } from "../cluster/runCluster";
 import Schedule, { ISchedule } from "../models/scheduleSchema";
 import User from "../models/userSchema";
 import Account from "../models/accountSchema";
 import { DateTime } from "luxon";
-import { browserPool } from "../browsers/preWarmedBrowserPool";
+import { browserPool } from "../browsers/prewarmedBrowserPool";
 
 interface ActiveSession {
   scheduleId: string;
@@ -16,6 +16,7 @@ interface ActiveSession {
   maxRetries: number;
   lastAttemptTime?: Date;
   status: "monitoring" | "processing" | "paused" | "retrying";
+  browsersPrewarmed?: boolean;
 }
 
 class ExamScheduler {
@@ -29,7 +30,7 @@ class ExamScheduler {
       return;
     }
 
-    console.log("🚀 Starting optimized scheduler...");
+    console.log("🚀 Starting OPTIMIZED scheduler with instant response...");
     this.isRunning = true;
 
     this.schedulerInterval = setInterval(async () => {
@@ -44,7 +45,7 @@ class ExamScheduler {
       console.error("❌ Initial check failed:", error);
     });
 
-    console.log("✅ Optimized scheduler started");
+    console.log("✅ Optimized scheduler started - INSTANT RESPONSE MODE");
   }
 
   stop(): void {
@@ -139,7 +140,7 @@ class ExamScheduler {
     const retryCount = (schedule as any).retryCount || 0;
     const maxRetries = (schedule as any).maxRetries || 5;
 
-    // 🔥 START PRE-WARMING BROWSERS IMMEDIATELY
+    // CRITICAL OPTIMIZATION: Start pre-warming browsers IMMEDIATELY
     const accountCount = await Account.countDocuments({
       user: user.id,
       status: true,
@@ -147,35 +148,45 @@ class ExamScheduler {
 
     if (accountCount > 0) {
       console.log(
-        `🔥 Pre-warming ${accountCount} browsers while monitoring...`
+        `🔥🔥🔥 INSTANT PRE-WARMING: ${accountCount} browsers starting NOW!`
       );
-      browserPool.warmupBrowsersForUser(user.id).catch((error) => {
-        console.error("❌ Browser pre-warming failed:", error);
-      });
+      
+      // Don't await - let it run in background for speed
+      browserPool.warmupBrowsersForUser(user.id)
+        .then(() => {
+          console.log(`✅ All browsers pre-warmed and pre-navigated!`);
+          const session = this.activeMonitoringSessions.get(scheduleId);
+          if (session) {
+            session.browsersPrewarmed = true;
+          }
+        })
+        .catch((error) => {
+          console.error("❌ Browser pre-warming failed:", error);
+        });
     }
 
     if (isRetry) {
       await this.sendLogToUser(
         user.telegramId,
         `🔄 **Retry Attempt ${retryCount + 1}/${maxRetries}**\n` +
-          `📋 Schedule: ${schedule.name}\n` +
-          `📅 Target: ${schedule.runAt.toLocaleString()}\n` +
-          `🔥 Pre-warming ${accountCount} browsers...\n` +
-          `⚡ Starting fast monitoring...`
+        `📋 Schedule: ${schedule.name}\n` +
+        `📅 Target: ${schedule.runAt.toLocaleString()}\n` +
+        `🔥 Pre-warming ${accountCount} browsers...\n` +
+        `⚡ Starting ultra-fast monitoring...`
       );
     } else {
       await this.sendLogToUser(
         user.telegramId,
-        `🚀 **Fast Monitoring Started**\n` +
-          `📋 Schedule: ${schedule.name}\n` +
-          `📅 Target: ${schedule.runAt.toLocaleString()}\n` +
-          `🔥 Pre-warming ${accountCount} browsers in background...\n` +
-          `⚡ Polling API every 3 seconds\n` +
-          `🔁 Retries available: ${maxRetries}`
+        `⚡⚡ **ULTRA-FAST MODE ACTIVATED**\n` +
+        `📋 Schedule: ${schedule.name}\n` +
+        `📅 Target: ${schedule.runAt.toLocaleString()}\n` +
+        `🔥 Pre-warming ${accountCount} browsers NOW!\n` +
+        `⚡ Polling every 2 seconds for instant response\n` +
+        `🚀 All browsers will launch SIMULTANEOUSLY when OID found`
       );
     }
 
-    console.log(`🎯 Starting monitoring: ${schedule.name}`);
+    console.log(`🎯 Starting INSTANT monitoring: ${schedule.name}`);
 
     await Schedule.findByIdAndUpdate(schedule._id, {
       status: "running",
@@ -193,25 +204,29 @@ class ExamScheduler {
       retryCount: isRetry ? retryCount + 1 : retryCount,
       maxRetries,
       status: "monitoring",
+      browsersPrewarmed: false,
     });
 
     try {
       await examMonitor.startPolling(schedule.runAt, {
-        interval: 3000,
+        interval: 2000, // OPTIMIZED: 2 second polling for fastest response
         maxDurationMs: 30 * 60 * 1000,
         onExamFound: async (exam) => {
           console.log(`📋 [${schedule.name}] Exam detected (no OID yet)`);
 
           const status = browserPool.getStatus();
-
-          await this.sendLogToUser(
-            user.telegramId,
-            `📋 **Exam Detected**\n` +
+          
+          // Non-blocking notification
+          setImmediate(() => {
+            this.sendLogToUser(
+              user.telegramId,
+              `📋 **Exam Detected**\n` +
               `📋 Schedule: ${schedule.name}\n` +
               `✅ Found exam with ${exam.modules?.length || 0} modules\n` +
               `🔥 Browsers ready: ${status.readyBrowsers}/${accountCount}\n` +
               `⏳ Waiting for OID...`
-          );
+            );
+          });
         },
         onExamWithOid: async (exam) => {
           const session = this.activeMonitoringSessions.get(scheduleId);
@@ -221,30 +236,59 @@ class ExamScheduler {
           }
 
           session.status = "processing";
-          console.log(`⚡ OID FOUND: ${exam.oid}`);
+          
+          // CRITICAL OPTIMIZATION: INSTANT MULTI-BROWSER LAUNCH
+          const oidDetectionTime = Date.now();
+          console.log(`⚡⚡⚡ OID FOUND: ${exam.oid} - INSTANT PARALLEL LAUNCH!`);
 
           const status = browserPool.getStatus();
 
-          if (status.readyBrowsers > 0) {
-            console.log(
-              `🎯 ${status.readyBrowsers} PRE-WARMED BROWSERS READY - INSTANT START!`
-            );
-          } else {
-            console.warn(`⚠️ Browsers not ready yet, will create on-the-fly`);
+          // Check if browsers are ready
+          if (status.readyBrowsers === 0) {
+            console.warn(`⚠️ NO BROWSERS READY - Waiting for warmup...`);
+            
+            // Wait briefly for browsers to be ready (max 5 seconds)
+            let waitTime = 0;
+            while (browserPool.getReadyCount() === 0 && waitTime < 5000) {
+              await new Promise(resolve => setTimeout(resolve, 100));
+              waitTime += 100;
+            }
+            
+            if (browserPool.getReadyCount() === 0) {
+              console.error(`❌ CRITICAL: No browsers ready after ${waitTime}ms wait`);
+            }
           }
 
-          await this.sendLogToUser(
-            user.telegramId,
-            `🎯 **OID FOUND - INSTANT PROCESSING!**\n` +
+          const readyCount = browserPool.getReadyCount();
+          console.log(`🚀 LAUNCHING ${readyCount} BROWSERS SIMULTANEOUSLY!`);
+
+          // Non-blocking user notification
+          setImmediate(() => {
+            this.sendLogToUser(
+              user.telegramId,
+              `⚡⚡⚡ **OID FOUND - INSTANT LAUNCH!**\n` +
               `📋 Schedule: ${schedule.name}\n` +
               `🆔 OID: ${exam.oid}\n` +
-              `🔥 Pre-warmed browsers: ${status.readyBrowsers}/${accountCount}\n` +
-              `⚡ Starting booking NOW...`
-          );
+              `🔥 Launching ${readyCount} browsers NOW!\n` +
+              `⚡ All accounts attacking simultaneously!`
+            );
+          });
 
           try {
             if (exam.oid) {
+              // CRITICAL: Launch all browsers instantly
+              const launchStartTime = Date.now();
+              
+              // Use the ultra-fast parallel launcher
               await runAllAccountsWithPrewarmedBrowsers(exam.oid, schedule.id);
+              
+              const totalLaunchTime = Date.now() - launchStartTime;
+              const totalResponseTime = Date.now() - oidDetectionTime;
+              
+              console.log(`⚡ PERFORMANCE METRICS:`);
+              console.log(`  - OID Detection → Launch: ${totalResponseTime}ms`);
+              console.log(`  - Browser Launch Time: ${totalLaunchTime}ms`);
+              console.log(`  - Browsers Launched: ${readyCount}`);
 
               await Schedule.findByIdAndUpdate(scheduleId, {
                 completed: true,
@@ -310,11 +354,11 @@ class ExamScheduler {
       await this.sendLogToUser(
         telegramId,
         `⚠️ **Attempt Failed - Will Retry**\n` +
-          `📋 Schedule: ${schedule.name}\n` +
-          `❌ Error: ${errorMessage}\n` +
-          `🔁 Retry ${retryCount + 1}/${maxRetries}\n\n` +
-          `⏰ Auto-retry in 2 minutes\n` +
-          `Or use /retry_${scheduleId} now`
+        `📋 Schedule: ${schedule.name}\n` +
+        `❌ Error: ${errorMessage}\n` +
+        `🔄 Retry ${retryCount + 1}/${maxRetries}\n\n` +
+        `⏰ Auto-retry in 2 minutes\n` +
+        `Or use /retry_${scheduleId} now`
       );
 
       this.activeMonitoringSessions.delete(scheduleId);
@@ -329,9 +373,9 @@ class ExamScheduler {
       await this.sendLogToUser(
         telegramId,
         `❌ **Schedule Failed - Max Retries**\n` +
-          `📋 Schedule: ${schedule.name}\n` +
-          `🚨 Error: ${errorMessage}\n` +
-          `🔁 Attempts: ${retryCount}/${maxRetries}`
+        `📋 Schedule: ${schedule.name}\n` +
+        `🚨 Error: ${errorMessage}\n` +
+        `🔄 Attempts: ${retryCount}/${maxRetries}`
       );
 
       this.activeMonitoringSessions.delete(scheduleId);
@@ -374,10 +418,8 @@ class ExamScheduler {
             await this.sendLogToUser(
               user.telegramId,
               `🔄 **Auto-Retry Starting**\n` +
-                `📋 ${schedule.name}\n` +
-                `🔁 Attempt ${(schedule.retryCount || 0) + 1}/${
-                  schedule.maxRetries || 5
-                }`
+              `📋 ${schedule.name}\n` +
+              `🔄 Attempt ${(schedule.retryCount || 0) + 1}/${schedule.maxRetries || 5}`
             );
           }
 
@@ -539,6 +581,7 @@ class ExamScheduler {
         status: session.status,
         retryCount: session.retryCount,
         maxRetries: session.maxRetries,
+        browsersPrewarmed: session.browsersPrewarmed || false,
       })
     );
 

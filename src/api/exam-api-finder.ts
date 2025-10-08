@@ -1,5 +1,33 @@
 import puppeteer from "puppeteer";
 import axios, { AxiosError } from "axios";
+import dns from 'dns';
+import http from 'http';
+import https from 'https';
+
+// DNS Pre-resolution for faster connections
+dns.resolve4('www.goethe.de', (err, addresses) => {
+  if (!err && addresses.length > 0) {
+    console.log(`⚡ DNS pre-resolved: goethe.de -> ${addresses[0]}`);
+  }
+});
+
+// Configure axios with keep-alive for connection reuse
+const httpAgent = new http.Agent({ 
+  keepAlive: true, 
+  maxSockets: 50,
+  keepAliveMsecs: 30000
+});
+
+const httpsAgent = new https.Agent({ 
+  keepAlive: true, 
+  maxSockets: 50,
+  keepAliveMsecs: 30000,
+  rejectUnauthorized: false // For faster SSL handshake
+});
+
+// Apply agents globally
+axios.defaults.httpAgent = httpAgent;
+axios.defaults.httpsAgent = httpsAgent;
 
 interface ExamModule {
   date: string;
@@ -42,6 +70,12 @@ class ExamApiMonitor {
   private consecutiveErrors = 0;
   private maxConsecutiveErrors = 5;
   private lastSuccessfulPoll: Date | null = null;
+  
+  // Pre-compiled URL template for instant string concatenation
+  private readonly BOOKING_URL_PREFIX = "https://www.goethe.de/coe?lang=en&oid=";
+  
+  // Pre-allocated response handler for zero overhead
+  private rapidOidHandler: ((exam: ExamData) => Promise<void>) | null = null;
 
   async captureApiUrl(
     maxRetries = 30,
@@ -126,7 +160,7 @@ class ExamApiMonitor {
         if (browser) {
           try {
             await browser.close();
-          } catch (e) {}
+          } catch (e) { }
         }
       }
 
@@ -177,7 +211,40 @@ class ExamApiMonitor {
     });
   }
 
+  // OPTIMIZED: Direct API call without retry logic for maximum speed
+  private async directApiCall(): Promise<ApiResponse | null> {
+    if (!this.apiUrl) return null;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+
+      const response = await axios.get(this.apiUrl, {
+        timeout: 5000,
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          "Accept": "application/json",
+          "Cache-Control": "no-cache",
+        },
+        validateStatus: (status) => status === 200,
+        decompress: true,
+        maxRedirects: 0,
+        responseType: 'json'
+      });
+
+      clearTimeout(timeout);
+      this.consecutiveErrors = 0;
+      this.lastSuccessfulPoll = new Date();
+      return response.data;
+    } catch (error) {
+      this.consecutiveErrors++;
+      return null;
+    }
+  }
+
   private async makeApiRequest(retries = 3): Promise<ApiResponse | null> {
+    // Fallback method with retry logic for non-critical calls
     if (!this.apiUrl) return null;
 
     for (let attempt = 1; attempt <= retries; attempt++) {
@@ -262,9 +329,10 @@ class ExamApiMonitor {
     return true;
   }
 
+  // OPTIMIZED: Ultra-fast polling with instant OID detection
   async startPolling(targetDate: Date, options: PollingOptions = {}) {
     const {
-      interval = 3000,
+      interval = 2000, // Reduced from 3000 for faster polling
       onExamFound,
       onExamWithOid,
       onTimeout,
@@ -273,13 +341,16 @@ class ExamApiMonitor {
       priorityLocations = ["chennai", "bengal", "bangalore"],
     } = options;
 
+    // Store the OID handler for ultra-fast access
+    this.rapidOidHandler = onExamWithOid || null;
+
     this.shouldStopPolling = false;
     this.processingOid = false;
     this.processedOids.clear();
     this.consecutiveErrors = 0;
 
     if (!this.apiUrl) {
-      console.log("🔡 Capturing API URL...");
+      console.log("📡 Capturing API URL...");
       await this.captureApiUrl();
 
       if (!this.apiUrl) {
@@ -289,23 +360,16 @@ class ExamApiMonitor {
       }
     }
 
-    if (this.isPolling) {
-      console.log("⚠️ Already polling, stopping previous");
-      this.stopPolling();
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
     const targetDateStr = targetDate.toISOString().split("T")[0];
     const targetTimeStr = targetDate.toTimeString().split(" ")[0];
 
     console.log(
-      `🔡 Fast polling every ${
-        interval / 1000
-      }s for ${targetDateStr} at ${targetTimeStr}`
+      `⚡ ULTRA-FAST polling mode - ${interval}ms interval for ${targetDateStr} at ${targetTimeStr}`
     );
 
     this.isPolling = true;
 
+    // Set timeout for max duration
     this.timeoutInterval = setTimeout(async () => {
       console.log(`⏰ Max duration reached`);
       this.shouldStopPolling = true;
@@ -319,122 +383,88 @@ class ExamApiMonitor {
       this.stopPolling();
     }, maxDurationMs);
 
-    this.pollInterval = setInterval(async () => {
+    // OPTIMIZED: Use immediate execution for fastest response
+    const rapidPoll = async () => {
       if (this.shouldStopPolling) {
-        console.log("🛑 Stopping poll");
         this.stopPolling();
         return;
       }
 
       if (this.processingOid) {
-        console.log("⏭️ Skipping - processing OID");
-        return;
-      }
-
-      const canContinue = await this.checkAndRecaptureApiUrl();
-      if (!canContinue) {
-        console.error("❌ Cannot continue polling");
-        this.stopPolling();
-        if (onTimeout) await onTimeout();
+        // Use setImmediate for fastest re-scheduling
+        setImmediate(() => setTimeout(rapidPoll, interval));
         return;
       }
 
       try {
-        const data = await this.makeApiRequest(2);
+        // CRITICAL: Direct API call for speed
+        const startTime = Date.now();
+        const data = await this.directApiCall();
+        const apiTime = Date.now() - startTime;
+
+        if (apiTime > 1000) {
+          console.warn(`⚠️ Slow API response: ${apiTime}ms`);
+        }
 
         if (!data || !data.DATA || !Array.isArray(data.DATA)) {
-          console.warn("⚠️ Invalid API response");
+          setImmediate(() => setTimeout(rapidPoll, interval));
           return;
         }
 
-        let matchingExams = data.DATA.filter((exam: ExamData) => {
-          if (!exam.bookFromStamp) return false;
+        // Process inline for maximum speed
+        for (const exam of data.DATA) {
+          if (!exam.bookFromStamp) continue;
 
           const bookFromDate = new Date(exam.bookFromStamp);
           const bookFromDateStr = bookFromDate.toISOString().split("T")[0];
           const bookFromTimeStr = bookFromDate.toTimeString().split(" ")[0];
 
           const dateMatches = bookFromDateStr === targetDateStr;
-          const timeMatches =
-            bookFromTimeStr.substring(0, 5) === targetTimeStr.substring(0, 5);
+          const timeMatches = bookFromTimeStr.substring(0, 5) === targetTimeStr.substring(0, 5);
 
-          return dateMatches && timeMatches;
-        });
-
-        if (matchingExams.length > 0) {
-          matchingExams = this.prioritizeExams(
-            matchingExams,
-            priorityLocations
-          );
-          const firstExam = matchingExams[0];
-
-          console.log(`🎯 Found ${matchingExams.length} matching exam(s)`);
-
-          for (const exam of matchingExams) {
-            if (exam.oid && this.processedOids.has(exam.oid)) {
-              console.log(
-                `⏭️ Skipping processed OID: ${exam.oid.substring(0, 8)}...`
-              );
-              continue;
-            }
-
+          if (dateMatches && timeMatches) {
+            // Exam found notification (non-blocking)
             if (onExamFound && !exam.oid) {
-              try {
-                await onExamFound(exam);
-              } catch (error) {
-                console.error("❌ onExamFound error:", error);
-              }
+              setImmediate(() => onExamFound(exam));
             }
 
-            if (exam.oid) {
-              console.log(
-                `🚀 OID FOUND: ${exam.oid} at ${exam.locationName || "Unknown"}`
-              );
-
+            // CRITICAL: INSTANT OID DETECTION AND LAUNCH
+            if (exam.oid && !this.processedOids.has(exam.oid)) {
+              console.log(`⚡⚡⚡ OID DETECTED: ${exam.oid} - INSTANT TRIGGER`);
+              console.log(`⏱️ Detection time: ${Date.now() - startTime}ms`);
+              
               this.processedOids.add(exam.oid);
+              this.processingOid = true;
 
-              if (onExamWithOid) {
-                try {
-                  this.processingOid = true;
-
-                  if (stopOnFirstOid) {
-                    this.shouldStopPolling = true;
-                    this.stopPolling();
-                  }
-
-                  console.log(`⚡ IMMEDIATE PROCESSING: ${exam.oid}`);
-                  await onExamWithOid(exam);
-
-                  this.processingOid = false;
-
-                  if (stopOnFirstOid) {
-                    return;
-                  }
-                } catch (error) {
-                  console.error("❌ onExamWithOid error:", error);
-                  this.processingOid = false;
-                }
+              if (this.rapidOidHandler) {
+                // CRITICAL: Execute immediately without waiting
+                // Fire and forget - don't await
+                this.rapidOidHandler(exam).catch(error => {
+                  console.error("OID handler error:", error);
+                });
               }
 
-              if (stopOnFirstOid && !onExamWithOid) {
+              if (stopOnFirstOid) {
                 this.shouldStopPolling = true;
                 this.stopPolling();
                 return;
               }
-            } else {
-              console.log(
-                `⏳ Exam found (${
-                  exam.eventName || "Unknown"
-                }) - waiting for OID...`
-              );
+            } else if (!exam.oid) {
+              console.log(`⏳ Exam found but no OID yet...`);
             }
           }
         }
-      } catch (error: any) {
-        console.error("❌ Polling error:", error.message);
-        this.consecutiveErrors++;
+      } catch (error) {
+        // Log async to not block polling
+        setImmediate(() => console.error("Poll error:", error));
       }
-    }, interval);
+
+      // Schedule next poll
+      setImmediate(() => setTimeout(rapidPoll, interval));
+    };
+
+    // Start polling immediately
+    setImmediate(rapidPoll);
   }
 
   stopPolling() {

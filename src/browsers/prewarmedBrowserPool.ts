@@ -1,13 +1,11 @@
 import puppeteer, { Browser, Page } from "puppeteer";
 import { proxyPool, USE_PROXIES } from "../proxyPool";
-import Account from "../models/accountSchema";
 
 interface PrewarmedBrowser {
   browser: Browser;
   page: Page;
   display: string;
-  account: any;
-  accountEmail: string;
+  browserNumber: number;
   isReady: boolean;
   createdAt: Date;
   proxyUsed?: string;
@@ -17,8 +15,8 @@ const activeDisplays = new Set<string>();
 const displayPool: string[] = Array.from({ length: 20 }, (_, i) => `:${i + 1}`);
 
 class PrewarmedBrowserPool {
-  private browsers: Map<string, PrewarmedBrowser> = new Map();
-  private warmingUp: Set<string> = new Set();
+  private browsers: Map<number, PrewarmedBrowser> = new Map();
+  private warmingUp: Set<number> = new Set();
   private displayAllocationLock = Promise.resolve();
   private preNavigated = false;
 
@@ -49,11 +47,11 @@ class PrewarmedBrowserPool {
   }
 
   private async prewarmBrowser(
-    account: any,
+    browserNumber: number,
     display: string
   ): Promise<PrewarmedBrowser | null> {
     try {
-      console.log(`🔥 Pre-warming ${account.email} on ${display}...`);
+      console.log(`🔥 Pre-warming browser ${browserNumber} on ${display}...`);
 
       let proxy: any = null;
       let proxyUrl = "";
@@ -61,7 +59,7 @@ class PrewarmedBrowserPool {
         proxy = proxyPool.getNextProxy();
         if (proxy) {
           proxyUrl = `${proxy.host}:${proxy.port}`;
-          console.log(`🔐 Proxy ${proxyUrl} → ${account.email}`);
+          console.log(`🔒 Proxy ${proxyUrl} → Browser ${browserNumber}`);
         }
       }
 
@@ -101,7 +99,6 @@ class PrewarmedBrowserPool {
         "--disable-extensions",
         "--disable-popup-blocking",
         "--disable-prompt-on-repost",
-        // OPTIMIZED: Aggressive performance flags
         "--aggressive-cache-discard",
         "--aggressive-tab-discard",
         "--disable-component-update",
@@ -141,7 +138,7 @@ class PrewarmedBrowserPool {
       await page.setDefaultNavigationTimeout(180000);
       await page.setDefaultTimeout(180000);
 
-      // OPTIMIZED: Minimal request interception for speed
+      // Minimal request interception for speed
       await page.setRequestInterception(true);
       page.on("request", (req) => {
         const resourceType = req.resourceType();
@@ -178,26 +175,25 @@ class PrewarmedBrowserPool {
         );
       });
 
-      console.log(`✅ Pre-warmed ${account.email}`);
+      console.log(`✅ Pre-warmed browser ${browserNumber}`);
 
       return {
         browser,
         page,
         display,
-        account,
-        accountEmail: account.email,
+        browserNumber,
         isReady: true,
         createdAt: new Date(),
         proxyUsed: proxyUrl,
       };
     } catch (error) {
-      console.error(`❌ Pre-warm failed ${account.email}:`, error);
+      console.error(`❌ Pre-warm failed browser ${browserNumber}:`, error);
       this.releaseDisplay(display);
       return null;
     }
   }
 
-  // OPTIMIZED: Pre-navigate browsers to Goethe domain for faster connection
+  // Pre-navigate browsers to Goethe domain for faster connection
   async preNavigateBrowsers(): Promise<void> {
     if (this.preNavigated) return;
     
@@ -212,10 +208,10 @@ class PrewarmedBrowserPool {
           waitUntil: 'domcontentloaded',
           timeout: 10000
         });
-        console.log(`✅ Pre-navigated browser for ${browser.accountEmail}`);
+        console.log(`✅ Pre-navigated browser ${browser.browserNumber}`);
         return true;
       } catch (error) {
-        console.warn(`⚠️ Pre-navigation failed for ${browser.accountEmail}`);
+        console.warn(`⚠️ Pre-navigation failed for browser ${browser.browserNumber}`);
         return false;
       }
     });
@@ -227,65 +223,57 @@ class PrewarmedBrowserPool {
     this.preNavigated = true;
   }
 
-  async warmupBrowsersForUser(userId: string): Promise<void> {
+  // MODIFIED: Warm exactly 20 browsers (no user/account dependency)
+  async warmup20Browsers(): Promise<void> {
     try {
-      console.log(`🔥 Warming browsers for user ${userId}...`);
+      console.log(`🔥 Warming up 20 browsers...`);
 
-      const accounts = await Account.find({
-        status: true,
-        user: userId,
-      }).populate("user");
+      // Warm 20 browsers in parallel
+      const warmupPromises = [];
+      
+      for (let i = 1; i <= 20; i++) {
+        if (this.warmingUp.has(i) || this.browsers.has(i)) {
+          continue;
+        }
 
-      if (accounts.length === 0) {
-        console.log(`⚠️ No accounts for user ${userId}`);
-        return;
+        this.warmingUp.add(i);
+
+        const warmupPromise = (async (browserNumber: number) => {
+          try {
+            const display = await this.allocateDisplay();
+            if (!display) {
+              console.warn(`⚠️ No display for browser ${browserNumber}`);
+              this.warmingUp.delete(browserNumber);
+              return;
+            }
+
+            const prewarmed = await this.prewarmBrowser(browserNumber, display);
+
+            if (prewarmed) {
+              this.browsers.set(browserNumber, prewarmed);
+              console.log(
+                `✅ Browser ${browserNumber} warmed (${this.browsers.size}/20)`
+              );
+            } else {
+              this.releaseDisplay(display);
+            }
+          } catch (error) {
+            console.error(`❌ Browser ${browserNumber} warmup failed:`, error);
+          } finally {
+            this.warmingUp.delete(browserNumber);
+          }
+        })(i);
+
+        warmupPromises.push(warmupPromise);
       }
-
-      console.log(`📊 Warming ${accounts.length} browsers...`);
-
-      // OPTIMIZED: Parallel browser warming
-      const warmupPromises = accounts.map(async (account) => {
-        if (
-          this.warmingUp.has(account.email) ||
-          this.browsers.has(account.email)
-        ) {
-          return;
-        }
-
-        this.warmingUp.add(account.email);
-
-        try {
-          const display = await this.allocateDisplay();
-          if (!display) {
-            console.warn(`⚠️ No display for ${account.email}`);
-            this.warmingUp.delete(account.email);
-            return;
-          }
-
-          const prewarmed = await this.prewarmBrowser(account, display);
-
-          if (prewarmed) {
-            this.browsers.set(account.email, prewarmed);
-            console.log(
-              `✅ ${account.email} warmed (${this.browsers.size}/${accounts.length})`
-            );
-          } else {
-            this.releaseDisplay(display);
-          }
-        } catch (error) {
-          console.error(`❌ ${account.email} warmup failed:`, error);
-        } finally {
-          this.warmingUp.delete(account.email);
-        }
-      });
 
       await Promise.all(warmupPromises);
 
       console.log(
-        `🎉 Warming complete! ${this.browsers.size}/${accounts.length} ready`
+        `🎉 Warming complete! ${this.browsers.size}/20 ready`
       );
       
-      // OPTIMIZED: Pre-navigate all browsers after warming
+      // Pre-navigate all browsers after warming
       await this.preNavigateBrowsers();
       
     } catch (error) {
@@ -293,37 +281,37 @@ class PrewarmedBrowserPool {
     }
   }
 
-  // OPTIMIZED: Get all ready browsers for simultaneous launch
+  // Get all ready browsers for simultaneous launch
   getAllReadyBrowsers(): PrewarmedBrowser[] {
     return Array.from(this.browsers.values()).filter(b => b.isReady);
   }
 
-  getPrewarmedBrowser(accountEmail: string): PrewarmedBrowser | null {
-    const browser = this.browsers.get(accountEmail);
+  getPrewarmedBrowser(browserNumber: number): PrewarmedBrowser | null {
+    const browser = this.browsers.get(browserNumber);
 
     if (browser && browser.isReady) {
-      console.log(`⚡ INSTANT: Got pre-warmed browser for ${accountEmail}`);
+      console.log(`⚡ INSTANT: Got pre-warmed browser ${browserNumber}`);
       return browser;
     }
 
     return null;
   }
 
-  removeBrowser(accountEmail: string): void {
-    this.browsers.delete(accountEmail);
+  removeBrowser(browserNumber: number): void {
+    this.browsers.delete(browserNumber);
   }
 
-  async closeBrowser(accountEmail: string): Promise<void> {
-    const browser = this.browsers.get(accountEmail);
+  async closeBrowser(browserNumber: number): Promise<void> {
+    const browser = this.browsers.get(browserNumber);
 
     if (browser) {
       try {
         await browser.browser.close();
         this.releaseDisplay(browser.display);
-        this.browsers.delete(accountEmail);
-        console.log(`🔄 Closed ${accountEmail}`);
+        this.browsers.delete(browserNumber);
+        console.log(`🔄 Closed browser ${browserNumber}`);
       } catch (error) {
-        console.error(`❌ Close error ${accountEmail}:`, error);
+        console.error(`❌ Close error browser ${browserNumber}:`, error);
       }
     }
   }
@@ -331,8 +319,8 @@ class PrewarmedBrowserPool {
   async closeAllBrowsers(): Promise<void> {
     console.log(`🔄 Closing ${this.browsers.size} browsers...`);
 
-    const closePromises = Array.from(this.browsers.keys()).map((email) =>
-      this.closeBrowser(email)
+    const closePromises = Array.from(this.browsers.keys()).map((num) =>
+      this.closeBrowser(num)
     );
 
     await Promise.allSettled(closePromises);
@@ -351,7 +339,7 @@ class PrewarmedBrowserPool {
         .length,
       warmingBrowsers: this.warmingUp.size,
       displays: Array.from(this.browsers.values()).map((b) => b.display),
-      accounts: Array.from(this.browsers.keys()),
+      browserNumbers: Array.from(this.browsers.keys()),
       preNavigated: this.preNavigated,
     };
   }

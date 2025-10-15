@@ -207,8 +207,7 @@ export const bot = new TelegramBot(token, { polling: true });
         await user.save();
         showMainMenu(
           chatId,
-          `Welcome ${
-            username || "User"
+          `Welcome ${username || "User"
           }! Your account has been created.\n\nChoose an option:`
         );
       } else {
@@ -252,96 +251,7 @@ export const bot = new TelegramBot(token, { polling: true });
 
     await handleDeleteSchedule(chatId, userId, scheduleId);
   });
-  bot.onText(/\/retry_(.+)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from?.id?.toString();
-    const scheduleId = match?.[1];
 
-    if (!userId || !scheduleId) return;
-
-    try {
-      await bot.sendMessage(chatId, "🔄 Retrying schedule...");
-
-      const schedule = await Schedule.findById(scheduleId);
-      if (!schedule) {
-        await bot.sendMessage(chatId, "❌ Schedule not found.");
-        return;
-      }
-
-      const user = await User.findOne({ telegramId: userId });
-      if (!user || schedule.createdBy.toString() !== user._id.toString()) {
-        await bot.sendMessage(
-          chatId,
-          "❌ You don't have permission to view this schedule."
-        );
-        return;
-      }
-
-      const info = await examScheduler.getScheduleInfo(scheduleId);
-
-      let statusMessage = `📊 **Schedule Status**\n\n`;
-      statusMessage += `📋 **Name:** ${schedule.name}\n`;
-      statusMessage += `🆔 **ID:** \`${scheduleId}\`\n`;
-      statusMessage += `📅 **Target Time:** ${schedule.runAt.toLocaleString()}\n`;
-      statusMessage += `📌 **Status:** ${schedule.status}\n`;
-      statusMessage += `✅ **Completed:** ${
-        schedule.completed ? "Yes" : "No"
-      }\n`;
-      statusMessage += `🔄 **Monitoring Active:** ${
-        info.isMonitoring ? "Yes" : "No"
-      }\n`;
-
-      if ((schedule as any).retryCount !== undefined) {
-        statusMessage += `🔁 **Retry Count:** ${(schedule as any).retryCount}/${
-          (schedule as any).maxRetries || 5
-        }\n`;
-      }
-
-      if (schedule.lastRun) {
-        statusMessage += `⏰ **Last Run:** ${schedule.lastRun.toLocaleString()}\n`;
-      }
-
-      if (schedule.lastError) {
-        statusMessage += `❌ **Last Error:** ${schedule.lastError}\n`;
-      }
-
-      if (info.session) {
-        statusMessage += `\n**Active Session Info:**\n`;
-        statusMessage += `⏱️ **Session Status:** ${info.session.status}\n`;
-        statusMessage += `🕐 **Started At:** ${info.session.startedAt.toLocaleString()}\n`;
-        const runningTime = Math.round(
-          (Date.now() - info.session.startedAt.getTime()) / 1000
-        );
-        statusMessage += `⏲️ **Running For:** ${runningTime}s\n`;
-      }
-
-      statusMessage += `\n**Available Commands:**\n`;
-
-      if (schedule.status === "failed" && !schedule.completed) {
-        statusMessage += `• /retry_${scheduleId} - Retry booking\n`;
-      }
-
-      if (info.isMonitoring && info.session?.status !== "paused") {
-        statusMessage += `• /pause_${scheduleId} - Pause monitoring\n`;
-      }
-
-      if (schedule.status === "paused") {
-        statusMessage += `• /resume_${scheduleId} - Resume monitoring\n`;
-      }
-
-      if (!schedule.completed) {
-        statusMessage += `• /stop_${scheduleId} - Stop completely\n`;
-      }
-
-      await bot.sendMessage(chatId, statusMessage, { parse_mode: "Markdown" });
-    } catch (error) {
-      console.error("Error getting schedule status:", error);
-      await bot.sendMessage(
-        chatId,
-        `❌ Failed to get schedule status: ${(error as Error).message}`
-      );
-    }
-  });
 
   bot.onText(/\/schedulehelp/, async (msg) => {
     const chatId = msg.chat.id;
@@ -403,7 +313,7 @@ export const bot = new TelegramBot(token, { polling: true });
       await bot.sendMessage(
         chatId,
         `⏸️ Schedule "${schedule.name}" paused successfully!\n\n` +
-          `Use /resume_${scheduleId} to resume.`
+        `Use /resume_${scheduleId} to resume.`
       );
     } catch (error) {
       console.error("Error pausing schedule:", error);
@@ -747,11 +657,11 @@ export const bot = new TelegramBot(token, { polling: true });
     await bot.sendMessage(
       chatId,
       `🔧 **Module Selection**\n\nPlease select the modules you want to enable for this account:${moduleStatus}\n\n` +
-        `📖 **Read** - Enable reading capabilities\n` +
-        `👂 **Hear** - Enable hearing capabilities\n` +
-        `✏️ **Write** - Enable writing capabilities\n` +
-        `🗣️ **Speak** - Enable speaking capabilities\n\n` +
-        `Click the modules to toggle them on/off, then click "Confirm Selection" when ready.`,
+      `📖 **Read** - Enable reading capabilities\n` +
+      `👂 **Hear** - Enable hearing capabilities\n` +
+      `✏️ **Write** - Enable writing capabilities\n` +
+      `🗣️ **Speak** - Enable speaking capabilities\n\n` +
+      `Click the modules to toggle them on/off, then click "Confirm Selection" when ready.`,
       {
         parse_mode: "Markdown",
         reply_markup: {
@@ -848,8 +758,8 @@ export const bot = new TelegramBot(token, { polling: true });
       await bot.sendMessage(
         chatId,
         `✅ Successfully created account!\n\n` +
-          `📧 Email: ${userState.email}\n` +
-          `🔧 Enabled Modules: ${modulesList}`
+        `📧 Email: ${userState.email}\n` +
+        `🔧 Enabled Modules: ${modulesList}`
       );
 
       showMainMenu(chatId, "What would you like to do next?");
@@ -1143,11 +1053,11 @@ export const bot = new TelegramBot(token, { polling: true });
     await bot.sendMessage(
       chatId,
       "⏰ Please enter the schedule details in **UTC time** using this format:\n\n" +
-        "YYYY-MM-DD HH:MM ScheduleName\n\n" +
-        "Example:\n" +
-        "2024-12-25 09:30 Christmas Booking (UTC)\n" +
-        "2025-01-15 14:00 January Session (UTC)\n\n" +
-        "Or click Cancel to return to the main menu.",
+      "YYYY-MM-DD HH:MM ScheduleName\n\n" +
+      "Example:\n" +
+      "2024-12-25 09:30 Christmas Booking (UTC)\n" +
+      "2025-01-15 14:00 January Session (UTC)\n\n" +
+      "Or click Cancel to return to the main menu.",
       cancelOptions
     );
   };
@@ -1200,8 +1110,7 @@ export const bot = new TelegramBot(token, { polling: true });
     if (!runAt.isValid) {
       await bot.sendMessage(
         chatId,
-        `❌ Invalid date/time: ${
-          runAt.invalidExplanation || "Please check your input"
+        `❌ Invalid date/time: ${runAt.invalidExplanation || "Please check your input"
         }`
       );
       return;
@@ -1241,10 +1150,10 @@ export const bot = new TelegramBot(token, { polling: true });
       await bot.sendMessage(
         chatId,
         `✅ Schedule created successfully!\n\n` +
-          `📝 Name: ${scheduleName}\n` +
-          `⏰ Scheduled for: ${displayTime}\n` +
-          `🆔 ID: ${newSchedule._id}\n\n` +
-          `All active accounts will run automatically at this time.`
+        `📝 Name: ${scheduleName}\n` +
+        `⏰ Scheduled for: ${displayTime}\n` +
+        `🆔 ID: ${newSchedule._id}\n\n` +
+        `All active accounts will run automatically at this time.`
       );
 
       showMainMenu(chatId, "What would you like to do next?");
@@ -1342,9 +1251,8 @@ export const bot = new TelegramBot(token, { polling: true });
             messageText += `   ⚠️ *Last Error:* ${errorPreview}\n`;
           }
 
-          messageText += `   🔧 *Monitoring:* ${
-            schedule.monitoringStarted ? "Yes" : "No"
-          }\n`;
+          messageText += `   🔧 *Monitoring:* ${schedule.monitoringStarted ? "Yes" : "No"
+            }\n`;
 
           // Quick action commands
           messageText += `   **Commands:** `;
@@ -1395,9 +1303,8 @@ export const bot = new TelegramBot(token, { polling: true });
         }
 
         if (completedSchedules.length > 5) {
-          messageText += `_...and ${
-            completedSchedules.length - 5
-          } more completed schedules_\n\n`;
+          messageText += `_...and ${completedSchedules.length - 5
+            } more completed schedules_\n\n`;
         }
       }
 
@@ -1464,9 +1371,8 @@ export const bot = new TelegramBot(token, { polling: true });
       const scheduleList = schedules
         .map((schedule, index) => {
           const runTime = schedule.runAt.toLocaleString();
-          return `${index + 1}. ${schedule.name} (${runTime}) - ID: ${
-            schedule._id
-          }`;
+          return `${index + 1}. ${schedule.name} (${runTime}) - ID: ${schedule._id
+            }`;
         })
         .join("\n");
 
@@ -1479,7 +1385,7 @@ export const bot = new TelegramBot(token, { polling: true });
       await bot.sendMessage(
         chatId,
         `🗑️ **Select a schedule to remove:**\n\n${scheduleList}\n\n` +
-          `Please enter the **full ID** of the schedule you want to remove:`,
+        `Please enter the **full ID** of the schedule you want to remove:`,
         cancelOptions
       );
     } catch (error) {
@@ -1587,7 +1493,7 @@ export const bot = new TelegramBot(token, { polling: true });
     console.log(`Polling error: ${error.name}: ${error.message}`);
   });
 
-  setInterval(() => {}, 100000);
+  setInterval(() => { }, 100000);
 
   process.on("SIGTERM", async () => {
     console.log("🛑 Caught SIGTERM, cleaning up browsers...");
